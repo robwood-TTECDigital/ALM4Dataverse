@@ -3,10 +3,10 @@
     #
     # Paths in this file are relative to the directory this file is in (the repo root).
     #
-    # FORK CONFIGURATION:
-    # To customize this configuration in a fork, create a fork-almconfig.psd1 file
+    # DEFAULT CONFIGURATION:
+    # To add default configuration for all repos using the shared repo, edit the alm-config-defaults.psd1 file
     # in the ALM4Dataverse repository root.
-    # Fork configuration is merged with this file (this file's values take precedence).
+    # Default configuration is merged with this file (this file's values take precedence).
     # Arrays are concatenated, hashtables are merged.
     # This allows forks to add custom defaults without modifying this template.
     #
@@ -24,6 +24,35 @@
     # - serviceAccountUpnConfigKey: (optional) name of the environment configuration key containing
     #   the service account UPN to use when activating processes in this solution.
     #   The default is 'DataverseServiceAccountUpn'
+    # - validationMode: (optional) 'error' (default), 'warning', or 'disabled'. Controls validation behavior for this solution.
+    #   - 'error': Validation failures cause pipeline to fail (default behavior)
+    #   - 'warning': Validation failures are reported as warnings only
+    #   - 'disabled': No validation is performed
+    # - skipValidationRules: (optional) array of validation rules to configure. Each entry is a hashtable with:
+    #   - ruleName: (required) name of the validation rule (e.g., 'ComponentInMoreThanOneUnmanagedSolution')
+    #   - mode: (optional) 'skip' (default) or 'warning'. Controls behavior for this rule.
+    #   - componentType: (optional) apply only for this component type number (e.g., 1 for entities)
+    #   - componentId: (optional) apply only for this specific component GUID
+    #   - componentSchemaName: (optional) apply only for component with this schema name
+    #
+    # Example with validation configurations:
+    # @{
+    #     name = 'MySolution'
+    #     validationMode = 'warning'  # All validation issues become warnings
+    #     skipValidationRules = @(
+    #         # Skip entire rule for this solution
+    #         @{ ruleName = 'SolutionUsesSystemPublisher'; mode = 'skip' }
+    #         # Warning mode for specific rule (errors become warnings)
+    #         @{ ruleName = 'ComponentInMoreThanOneUnmanagedSolution'; mode = 'warning' }
+    #         # Skip rule for specific component type (1 = entity)
+    #         @{ ruleName = 'ComponentSchemaNamePrefixDoesNotMatchPublisherPrefix'; componentType = 1; mode = 'skip' }
+    #         # Warning for specific component by ID
+    #         @{ ruleName = 'DependencyOnSolutionNotAllowed'; componentType = 1; componentId = 'guid-here'; mode = 'warning' }
+    #         # Skip for specific component by schema name
+    #         @{ ruleName = 'EnvironmentVariableCurrentValueInSolution'; componentType = 380; componentSchemaName = 'legacy_component'; mode = 'skip' }
+    #     )
+    # }
+    # See ttec-digital/docs/solution-validation.md for complete documentation
     solutions = @(
     )
 

@@ -1,0 +1,72 @@
+name: IMPORT
+description: IMPORT
+inputs:
+  environment:
+    required: true
+    description: Env name
+  varsjson:
+    required: true
+    description: Vars
+  secretsjson:
+    required: true
+    description: Secrets
+runs:
+  using: composite
+  steps:
+    - name: Set environment specific vars
+      shell: pwsh
+      run: |
+        $varsjson = @"
+        ${{ inputs.varsjson }}
+        "@
+
+        $vars = $varsjson | convertfrom-json
+
+        @($vars.psobject.properties) | Where-Object { $_.Name } | foreach-object {
+          $name = $_.Name 
+          $value = $_.Value
+          "$name=$value" | tee-object -append $env:GITHUB_ENV
+        }
+
+        @($vars.psobject.properties) | Where-Object { $_.Name -and $_.Name.StartsWith("${{ inputs.environment }}_", "OrdinalIgnoreCase")} | foreach-object {
+          $name = $_.Name -replace "${{ inputs.environment }}_", ""
+          $value = $_.Value
+          "$name=$value" | tee-object -append $env:GITHUB_ENV
+        }
+
+        $secretsjson = @"
+        ${{ inputs.secretsjson }}
+        "@
+
+        $secrets = $secretsjson | convertfrom-json
+        @($secrets.psobject.properties) | Where-Object { $_.Name } | foreach-object {
+          $name = $_.Name
+          $value = $_.Value
+          "$name=$value" | tee-object -append $env:GITHUB_ENV
+        }
+
+        @($secrets.psobject.properties) | Where-Object { $_.Name -and $_.Name.StartsWith("${{ inputs.environment }}_", "OrdinalIgnoreCase")} | foreach-object {
+          $name = $_.Name -replace "${{ inputs.environment }}_", ""
+          $value = $_.Value
+          "$name=$value" | tee-object -append $env:GITHUB_ENV
+        }
+    - shell: pwsh
+      run: git config --system core.longpaths true          
+    - uses: actions/checkout@v4
+      name: Checkout current repo
+      with:
+        path: self
+    - uses: microsoft/powerplatform-actions/actions-install@v1
+      name: Power Platform Tool Installer
+      with:
+        add-tools-to-path: true
+    - shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        & ${{ github.action_path }}/../../scripts/installdependencies.ps1  
+        & ${{ github.action_path }}/../../scripts/connect.ps1 -ConnectionString "AuthType=ClientSecret;Url=${{ env.dataverseurl }};ClientId=${{ env.dataverseapplicationid }};ClientSecret=${{ env.dataverseclientsecret }};TenantId=${{ env.dataversetenantid }};RedirectUri=http://localhost;"      
+         
+        & ${{ github.action_path }}/../../scripts/import.ps1 `
+          -SourceDirectory ${{ github.workspace}}/self `
+          -ArtifactStagingDirectory ${{ github.workspace}}/artifacts
+      working-directory: ${{ github.workspace }}/self

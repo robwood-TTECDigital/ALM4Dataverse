@@ -1,0 +1,17 @@
+on:
+  workflow_dispatch:
+name: IMPORT
+jobs:
+  job1:
+    environment: DEV_${{ github.ref_name }}
+    runs-on: windows-2019
+    name: IMPORT to DEV_${{ github.ref_name }}
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+    steps:
+      - uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/IMPORT@main
+        with:
+          environment: DEV_${{ github.ref_name }}
+          varsjson: ${{ toJSON(vars)}}
+          secretsjson: ${{ toJSON(secrets )}}

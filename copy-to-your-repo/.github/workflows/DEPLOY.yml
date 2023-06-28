@@ -1,0 +1,34 @@
+on:
+  workflow_dispatch:
+    inputs:
+      artifacts-run-id:
+        required: true
+  workflow_run:
+    workflows: BUILD
+    types:
+      - completed
+permissions:
+  actions: read
+  contents: read
+  deployments: write
+name: DEPLOY
+jobs:
+  job1:
+    strategy:
+      max-parallel: 1
+      matrix:
+        environment: ["SAT_main", "UAT_main"]
+    if: ${{ inputs.artifacts-run-id != null || github.event.workflow_run.conclusion == 'success' }}
+    environment: ${{ matrix.environment }}
+    runs-on: windows-2019
+    name: DEPLOY to ${{ matrix.environment }}
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+    steps:
+      - uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/DEPLOY@main
+        with:
+          environment: ${{ matrix.environment }}
+          artifactsrunid: ${{ inputs.artifacts-run-id}}${{ github.event.workflow_run.id  }}
+          varsjson: ${{ toJSON(vars)}}
+          secretsjson: ${{ toJSON(secrets )}}

@@ -796,7 +796,7 @@ $justInitialized = $false
 if (-not $hasCommits) {
     Write-Host "Repository '$sharedRepoName' has no commits. Seeding it from the upstream repo..." -ForegroundColor Yellow
 
-    $sharedSourceUrl = 'https://github.com/rnwood/ALM4Dataverse.git'
+    $sharedSourceUrl = 'https://ttecdigital-msba-emea@dev.azure.com/ttecdigital-msba-emea/Dataverse-ALM/_git/Dataverse-ALM'
     $destUrl = $repo.remoteUrl
     if (-not $destUrl) {
         throw "Could not determine remoteUrl for repository '$sharedRepoName'."
@@ -852,7 +852,7 @@ if (-not $hasCommits) {
 
 # Check if we can fast-forward from the shared repo (skip if just initialized)
 if (-not $justInitialized) {
-$sharedSourceUrl = 'https://github.com/rnwood/ALM4Dataverse.git'
+$sharedSourceUrl = 'https://ttecdigital-msba-emea@dev.azure.com/ttecdigital-msba-emea/Dataverse-ALM/_git/Dataverse-ALM'
 $destUrl = $repo.remoteUrl
 if (-not $destUrl) {
     throw "Could not determine remoteUrl for repository '$sharedRepoName'."

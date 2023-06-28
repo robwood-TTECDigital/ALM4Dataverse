@@ -120,6 +120,35 @@ scriptDependencies = @{
 When build assets are generated, the version that has been selected is frozen and baked into the configuration file that will be used when deploying.
 This ensures that the same exact version of all dependencies is always used for each release, even across extended time period and environments.
 
+### Azure Synapse Integration (TTEC Digital Extension)
+
+Configuration for Azure Synapse asset management. See [Azure Synapse Integration](../../ttec-digital/docs/azure-synapse.md) for detailed documentation.
+
+```powershell
+@{
+    SynapseRepositoryUrl = 'https://user@dev.azure.com/org/project/_git/SynapseRepo'
+    SynapseFolders = @(
+        'DataverseIntegration',
+        'Reporting'
+    )
+    SynapseLinkedServicesInclude = @('ls-dataverse-*')
+    SynapseLinkedServicesExclude = @('*WorkspaceDefault*', 'ls-legacy-*')
+    SynapseManagedPrivateEndpoints = @(
+        @{
+            Name = 'endpoint-name'
+            Definition = '{ ... }'
+        }
+    )
+}
+```
+
+**Properties:**
+- `SynapseRepositoryUrl` (required when using Synapse): Git clone URL for the Synapse Development repository
+- `SynapseFolders` (required): Array of folder names to filter and deploy
+- `SynapseLinkedServicesInclude` (optional): Wildcard patterns for linked services to include
+- `SynapseLinkedServicesExclude` (optional): Wildcard patterns for linked services to exclude
+- `SynapseManagedPrivateEndpoints` (optional): Array of managed private endpoints to create
+
 ## Advanced - Fork Configuration
 
 To customize this configuration in a custom fork, you can edit the `alm-config-defaults.psd1` file in the ALM4Dataverse repository root.

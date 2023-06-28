@@ -1,3 +1,36 @@
+# Dataverse-ALM 
+## TTEC Digital fork of ALM4Dataverse
+
+This repo contains a TTEC Digital custom fork of the ALM4Dataverse OSS project.
+See the main content from that project below for info on the bulk of what this does.
+
+This fork adds:
+
+
+- backwards compatibility with the previous Dataverse-ALM implementation and a migration process to assist with updating configuration.
+- TTEC Digital proprietary extensions:
+   - Solution validation rules
+   - Azure Synapse component management
+   - Schema migration tracking.
+
+
+See the docs in `ttec-digital/docs` for further info on these features.
+
+
+## Upgrading from v1
+
+1) Clone your repo to a local workspace
+
+2) Run either `ttec-digital/migrate-azdo-repo.ps1` or `ttec-digital/migrate-github-repo.ps1` with `-WorkspacePath pathto/workspace` pointing to the workspace folder.
+
+3) Any custom pre/post X scripts may need to adapt slightly:
+ - Scripts require `context` parameter instead of individual parameters. See the config docs.
+ - Put PowerShell module requirements into `alm-config.psd1` and remove any commands to install and load them.
+
+4) Commit and push the changes back up to the remote.
+
+---
+
 ![ALM4Dataverse](logo.png)
 
 This repo contains:
@@ -7,14 +40,15 @@ implementation for Dataverse.
 
 Currently to be used with Azure DevOps, but may be extended to GitHub in future (which is straightforward due to the way it is implemented).
 
+
 Features:
+
 
 - Handles zero to many Dataverse solutions per repo.
 - Correctly determines the install/upgrade/update method for each solution based on the state of the target environment
 - Supports branches, PRs etc with minimal re-configuration
 - Supports including config/system/lookup data
 - Easy to extend using the extensive PowerShell ecosystem.
-
 
 ## Getting Started
 

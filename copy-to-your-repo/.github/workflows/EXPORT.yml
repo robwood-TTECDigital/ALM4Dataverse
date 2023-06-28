@@ -1,0 +1,24 @@
+on:
+  workflow_dispatch:
+    inputs:
+      commitcomment:
+        type: string
+        required: true
+        description: Describe the changes being exported. Include work item numbers.
+permissions:
+  contents: write        
+name: EXPORT
+jobs:
+  job1:
+    runs-on: windows-2019
+    name: EXPORT from ${{ format('DEV_{0}', github.ref_name) }}
+    environment: DEV_${{ github.ref_name }}
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+    steps:
+      - uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/EXPORT@main
+        with:
+         commitcomment: ${{ inputs.commitcomment }}
+         varsjson: ${{ toJSON(vars)}}
+         secretsjson: ${{ toJSON(secrets )}}

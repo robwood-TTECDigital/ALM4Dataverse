@@ -1,0 +1,24 @@
+on:
+  workflow_dispatch:
+  push:
+    branches: 
+    - main
+    tags-ignore: 
+    - '**'
+    paths-ignore: 
+    - .github/**
+permissions:
+  contents: write
+name: BUILD
+run-name: ${{ github.ref_name }}-${{ github.event.repository.pushed_at }}-${{ github.run_attempt }}
+jobs:
+  job1:
+    runs-on: windows-2019
+    name: BUILD
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+    steps:
+      - uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/BUILD@main
+        with:
+          build-number: ${{ github.ref_name }}-${{ github.event.repository.pushed_at }}-${{ github.run_attempt }}
