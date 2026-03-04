@@ -16,7 +16,7 @@ if (-not (test-path data) ) {
 
 function exportDataset($datasetname) {
     write-host "Exporting data set '$datasetname'"
-    $tempdatafile = "$($env:TEMP)/data-$datasetname.zip"
+    $tempdatafile = "$($context.TempDirectory)/data-$datasetname.zip"
     pac data export --schemafile (resolve-path data/$datasetname/schema.xml) --overwrite --datafile $tempdatafile
     if (-not $? -or $LASTEXITCODE -ne 0) { throw "pac data export failed"; }
     if (test-path data/$datasetname/data) {
@@ -56,7 +56,7 @@ if ($config.ContainsKey("Portals")) {
 
     foreach ($portalname in $config.Portals.Keys) {
    
-        $tempfolder = "$($env:TEMP)/portal-$portalname"
+        $tempfolder = "$($context.TempDirectory)/portal-$portalname"
         new-item -type Directory $tempfolder
 
         pac paportal download --overwrite --path "$tempfolder" --webSiteId ($config.Portals[$portalname])
@@ -112,7 +112,7 @@ foreach ($solutionconfig in $config.solutions) {
 
     Write-Host "Validating solution '$($solutionconfig.name)'..."
 
-    $solutionzippath = "$($env:TEMP)/$($solutionconfig.name)-validation.zip"
+    $solutionzippath = "$($context.TempDirectory)/$($solutionconfig.name)-validation.zip"
     $SolutionFolderPath = "$SourceDirectory/solutions/$($solutionconfig.name)"
 
     write-host "##[debug] Compressing solution folder '$SolutionFolderPath' to '$solutionzippath'"

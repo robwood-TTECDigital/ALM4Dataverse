@@ -803,7 +803,7 @@ if (-not $hasCommits) {
     }
 
     # Create a temp folder for initializing the repo
-    $workRoot = Join-Path $env:TEMP ("ALM4Dataverse-Init-" + [guid]::NewGuid().ToString('n'))
+    $workRoot = Join-Path ([IO.Path]::GetTempPath()) ("ALM4Dataverse-Init-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 
     try {
@@ -859,7 +859,7 @@ if (-not $destUrl) {
 }
 
 # Create a temp folder for checking history
-$workRoot = Join-Path $env:TEMP ("ALM4Dataverse-Check-" + [guid]::NewGuid().ToString('n'))
+$workRoot = Join-Path ([IO.Path]::GetTempPath()) ("ALM4Dataverse-Check-" + [guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 
 try {
@@ -1074,7 +1074,7 @@ function Sync-CopyToYourRepoIntoGitRepo {
         throw "Could not determine remoteUrl for repository '$($TargetRepo.Name)'."
     }
 
-    $cloneRoot = Join-Path $env:TEMP ("ALM4Dataverse-MainRepo-" + [guid]::NewGuid().ToString('n'))
+    $cloneRoot = Join-Path ([IO.Path]::GetTempPath()) ("ALM4Dataverse-MainRepo-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $cloneRoot -Force | Out-Null
 
     Write-Host "Cloning '$($TargetRepo.Name)' to a temp folder..." -ForegroundColor Yellow
@@ -2399,7 +2399,7 @@ function Get-ExistingSolutionsFromRepo {
     
     if (-not $MainRepo.remoteUrl) { return @() }
 
-    $cloneRoot = Join-Path $env:TEMP ("ALM4Dataverse-ConfigRead-" + [guid]::NewGuid().ToString('n'))
+    $cloneRoot = Join-Path ([IO.Path]::GetTempPath()) ("ALM4Dataverse-ConfigRead-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $cloneRoot -Force | Out-Null
 
     try {
@@ -2610,7 +2610,7 @@ function Update-AlmConfigInMainRepo {
         throw "Could not determine remoteUrl for repository '$($MainRepo.Name)'."
     }
 
-    $cloneRoot = Join-Path $env:TEMP ("ALM4Dataverse-ConfigUpdate-" + [guid]::NewGuid().ToString('n'))
+    $cloneRoot = Join-Path ([IO.Path]::GetTempPath()) ("ALM4Dataverse-ConfigUpdate-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $cloneRoot -Force | Out-Null
 
     Write-Host "Cloning '$($MainRepo.Name)' to update alm-config.psd1..." -ForegroundColor Yellow
@@ -2869,7 +2869,7 @@ function Get-ExistingEnvironmentsFromRepo {
     
     if (-not $MainRepo.remoteUrl) { return @() }
 
-    $cloneRoot = Join-Path $env:TEMP ("ALM4Dataverse-EnvRead-" + [guid]::NewGuid().ToString('n'))
+    $cloneRoot = Join-Path ([IO.Path]::GetTempPath()) ("ALM4Dataverse-EnvRead-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $cloneRoot -Force | Out-Null
 
     try {
@@ -3052,7 +3052,7 @@ function Update-DeployPipelineInMainRepo {
         throw "Could not determine remoteUrl for repository '$($MainRepo.Name)'."
     }
 
-    $cloneRoot = Join-Path $env:TEMP ("ALM4Dataverse-DeployUpdate-" + [guid]::NewGuid().ToString('n'))
+    $cloneRoot = Join-Path ([IO.Path]::GetTempPath()) ("ALM4Dataverse-DeployUpdate-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $cloneRoot -Force | Out-Null
 
     Write-Host "Cloning '$($MainRepo.Name)' to update deployment pipeline..." -ForegroundColor Yellow

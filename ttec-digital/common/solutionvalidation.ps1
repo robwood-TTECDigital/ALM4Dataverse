@@ -7,8 +7,8 @@ function getComponentNames(
 ) {
     
     # Cache for component definitions to avoid repeated lookups
-    if (-not $script:componentDefinitionCache) {
-        $script:componentDefinitionCache = @{}
+    if (-not (Test-Path variable:script:componentDefinitionCache)) {
+        Set-Variable -Scope Script -Name componentDefinitionCache -Value @{}
     }
     
     # Determine the table name and column names based on component type
@@ -303,7 +303,7 @@ function validateSolution(
 
     # Determine the effective validation mode for this solution
     $validationMode = 'error'  # default
-    if ($solutionconfig.validationMode) {
+    if ($solutionconfig.ContainsKey("validationMode") -and $solutionconfig.validationMode) {
         $validationMode = $solutionconfig.validationMode.ToLower()
     }
 
@@ -394,7 +394,7 @@ function getValidationRuleMode(
     [Parameter()][string]$componentSchemaName,
     [Parameter()][hashtable]$solutionconfig
 ) {
-    if (-not $solutionconfig.skipValidationRules) {
+    if (-not ($solutionconfig.ContainsKey("skipValidationRules") -and $solutionconfig.skipValidationRules)) {
         return 'error'
     }
     
@@ -474,7 +474,7 @@ function validateSolutionInternal(
         $ruleMode = 'error'  # default
         $skipRule = $false
         
-        if ($solutionconfig.skipValidationRules) {
+        if ( $solutionconfig.ContainsKey("skipValidationRules") -and $solutionconfig.skipValidationRules) {
             foreach ($skipConfig in $solutionconfig.skipValidationRules) {
                 if ($skipConfig.ruleName -eq $ruleName) {
                     # If no component-specific filters, this applies to the entire rule
