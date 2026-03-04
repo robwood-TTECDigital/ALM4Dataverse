@@ -16,6 +16,7 @@ SELECT DISTINCT
     dep.requiredcomponentobjectid,
     dep.requiredcomponenttype,
     dep.requiredcomponentparentid,
+    dep.requiredcomponentbasesolutionid,
     dep.dependentcomponentobjectid,
     dep.dependentcomponenttype
 FROM dependency dep
@@ -42,9 +43,11 @@ $dependencies = Invoke-DataverseSQL -Sql $sql -Parameters @{
 $badDeps = @()
 
 foreach ($dep in $dependencies) {
+    $requiredsolutioncomponents = @()
     $requiredComponentId = $dep.requiredcomponentobjectid
     $requiredComponentType = $dep.requiredcomponenttype
     $requiredParentId = $dep.requiredcomponentparentid
+    $requiredBaseSolutionId = $dep.requiredcomponentbasesolutionid
     $dependentComponentId = $dep.dependentcomponentobjectid
     $dependentComponentType = $dep.dependentcomponenttype
     
@@ -66,8 +69,65 @@ foreach ($dep in $dependencies) {
             $validDependencyFilter += " AND s.uniquename NOT LIKE '$($validPattern.Replace("*", "%"))'"
         }
     }
+
+    # Prefer authoritative base solution from dependency table when available
+    $baseSolutionEvaluated = $false
+    if ($requiredBaseSolutionId -and -not [string]::IsNullOrWhiteSpace($requiredBaseSolutionId.ToString())) {
+        $baseSolutionSql = @"
+SELECT
+    s.uniquename AS SolutionName,
+    s.solutionid AS SolutionId,
+    s.ismanaged AS Managed
+FROM solution s
+WHERE s.solutionid = @requiredBaseSolutionId
+"@
+
+        $baseSolutionRows = @(Invoke-DataverseSQL -Sql $baseSolutionSql -Parameters @{
+            requiredBaseSolutionId = $requiredBaseSolutionId
+        })
+
+        if ($baseSolutionRows.Length -gt 0) {
+            $baseSolutionEvaluated = $true
+            $baseSolutionName = $baseSolutionRows[0].SolutionName
+            $baseSolutionId = $baseSolutionRows[0].SolutionId.ToString()
+
+            $isSystemOrDefault = $baseSolutionName -in @('Default', 'Common Data Services Default Solution', 'Active', 'Basic', 'System') -or $baseSolutionId -eq '00000001-0000-0000-0001-00000000009b'
+
+            $isIgnoredSolution = $false
+            if ($context.ignoresolutionnames -and $context.ignoresolutionnames.Length -gt 0) {
+                foreach ($pattern in $context.ignoresolutionnames) {
+                    if ($baseSolutionName -like $pattern) {
+                        $isIgnoredSolution = $true
+                        break
+                    }
+                }
+            }
+
+            $isValidDependencySolution = $false
+            if ($context.validdependencysolutionnames -and $context.validdependencysolutionnames.Length -gt 0) {
+                foreach ($validPattern in $context.validdependencysolutionnames) {
+                    if ($baseSolutionName -like $validPattern) {
+                        $isValidDependencySolution = $true
+                        break
+                    }
+                }
+            }
+
+            if (-not $isSystemOrDefault -and $baseSolutionName -ne $context.solutionname -and -not $isIgnoredSolution -and -not $isValidDependencySolution) {
+                $requiredsolutioncomponents = @([PSCustomObject]@{
+                    SolutionName = $baseSolutionName
+                    SolutionId = $baseSolutionRows[0].SolutionId
+                    Managed = $baseSolutionRows[0].Managed
+                    ComponentId = $requiredComponentId
+                    ComponentType = $requiredComponentType
+                    Behaviour = "BaseLayer"
+                })
+            }
+        }
+    }
     
-    # First try to find the required component (not ShellOnly)
+    # First try to find the required component (not ShellOnly) when no base solution was available
+    if ($requiredsolutioncomponents.Length -eq 0 -and -not $baseSolutionEvaluated) {
     $componentSql = @"
 SELECT 
     s.uniquename AS SolutionName,
@@ -91,6 +151,7 @@ WHERE sc.objectid = @requiredComponentId
     AND s.solutionid <> '00000001-0000-0000-0001-00000000009b'
     $ignoreFilter
     $validDependencyFilter
+ORDER BY s.installedon ASC, s.createdon ASC
 "@
     
     $requiredsolutioncomponents = @(Invoke-DataverseSQL -Sql $componentSql -Parameters @{
@@ -98,11 +159,12 @@ WHERE sc.objectid = @requiredComponentId
         requiredComponentType = $requiredComponentType
         solutionname = $context.solutionname
     })
+    }
     
-    # If not found and there's a parent, try to find the parent with ShellOnly
-    if ($requiredsolutioncomponents.Length -eq 0 -and $requiredParentId) {
+    # If not found and there's a parent, fallback to earliest non-shell parent layer (only when base solution wasn't available)
+    if ($requiredsolutioncomponents.Length -eq 0 -and $requiredParentId -and -not $baseSolutionEvaluated) {
         $parentSql = @"
-SELECT 
+SELECT TOP 1
     s.uniquename AS SolutionName,
     s.solutionid AS SolutionId,
     s.ismanaged AS Managed,
@@ -117,18 +179,24 @@ SELECT
 FROM solutioncomponent sc
 INNER JOIN solution s ON sc.solutionid = s.solutionid
 WHERE sc.objectid = @requiredParentId
-    AND sc.rootcomponentbehavior = 2  -- ShellOnly
+    AND sc.rootcomponentbehavior <> 2  -- Prefer non-shell parent layer
     AND s.uniquename <> @solutionname
     AND s.uniquename NOT IN ('Default', 'Common Data Services Default Solution', 'Active', 'Basic', 'System')
     AND s.solutionid <> '00000001-0000-0000-0001-00000000009b'
     $ignoreFilter
     $validDependencyFilter
+ORDER BY s.installedon ASC, s.createdon ASC
 "@
         
         $requiredsolutioncomponents = @(Invoke-DataverseSQL -Sql $parentSql -Parameters @{
             requiredParentId = $requiredParentId
             solutionname = $context.solutionname
         })
+    }
+
+    # If base solution was evaluated and didn't produce an invalid dependency, skip this dependency
+    if ($requiredsolutioncomponents.Length -eq 0 -and $baseSolutionEvaluated) {
+        continue
     }
     
     # If still not found, get the component name anyway and mark as not in any solution
@@ -143,11 +211,19 @@ WHERE sc.objectid = @requiredParentId
     
     # Load names for required and dependent components (only for invalid dependencies)
     if ($requiredsolutioncomponents.Length -gt 0) {
-        # Get the solution ID of the first required solution component
-        $reqSolutionId = $requiredsolutioncomponents[0].SolutionId.ToString()
-        
-        # Load required component name (from the invalid solution it's in)
-        $reqNames = getComponentNames -componentId $requiredComponentId -componentType $requiredComponentType -solutionId $reqSolutionId
+        # Get the solution ID of the first required solution component (if present)
+        $reqSolutionId = $null
+        if ($requiredsolutioncomponents[0].PSObject.Properties.Name -contains 'SolutionId' -and $requiredsolutioncomponents[0].SolutionId) {
+            $reqSolutionId = $requiredsolutioncomponents[0].SolutionId.ToString()
+        }
+
+        # Load required component name
+        $reqNames = if ($reqSolutionId) {
+            getComponentNames -componentId $requiredComponentId -componentType $requiredComponentType -solutionId $reqSolutionId
+        }
+        else {
+            getComponentNames -componentId $requiredComponentId -componentType $requiredComponentType
+        }
         
         # Load dependent component name (from the solution being validated)
         Write-Verbose "Looking up dependent component: ID=$dependentComponentId, Type=$dependentComponentType"

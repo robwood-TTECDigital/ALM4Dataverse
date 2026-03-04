@@ -75,6 +75,10 @@ $testSolutions = @{
         Publisher = $testPublisher1
         Description = "Negative test solution - properly configured, should pass all validations" 
     }
+    "ValidationTest_Behavior1" = @{
+        Publisher = $testPublisher1
+        Description = "Behavior test solution - used to validate behavior 1 component handling"
+    }
 }
 
 #endregion
@@ -215,10 +219,23 @@ function Setup-TestSolutions {
     
     foreach ($solutionName in $testSolutions.Keys) {
         $config = $testSolutions[$solutionName]
+        $publisherUniqueName = $config.Publisher
+
+        # Resolve system default publisher dynamically for the current org
+        if ($solutionName -eq "ValidationTest_SystemPub") {
+            $publisherExists = Invoke-DataverseSql -Sql "SELECT publisherid FROM publisher WHERE uniquename = @name" -Parameters @{ name = $publisherUniqueName }
+            if (-not $publisherExists) {
+                $resolved = Invoke-DataverseSql -Sql "SELECT TOP 1 uniquename FROM publisher WHERE uniquename LIKE 'DefaultPublisher%' ORDER BY createdon ASC"
+                if ($resolved -and $resolved[0].uniquename) {
+                    $publisherUniqueName = $resolved[0].uniquename
+                    Write-Verbose "Resolved system publisher dynamically: $publisherUniqueName"
+                }
+            }
+        }
         
         $existing = Get-DataverseSolution | Where-Object { $_.uniquename -eq $solutionName }
         if (-not $existing) {
-            Set-DataverseSolution -UniqueName $solutionName -Name $solutionName -Description $config.Description -PublisherUniqueName $config.Publisher
+            Set-DataverseSolution -UniqueName $solutionName -Name $solutionName -Description $config.Description -PublisherUniqueName $publisherUniqueName
             Write-Host "  Created solution: $solutionName" -ForegroundColor Green
         } else {
             Write-Verbose "Solution already exists: $solutionName"
@@ -432,8 +449,8 @@ function Setup-TestComponents {
     # Note: The API doesn't fully support behavior=2 and converts it to behavior=1
     # This means we can test that behavior=1 IS validated (unlike behavior=2 which would be excluded)
     # Rule basis: Shell-only components (behavior=2) are metadata references only and should be excluded from validation
-    Set-DataverseSolutionComponent -SolutionName "ValidationTest_Negative1" -ComponentId $accountEntity.MetadataId -ComponentType 1 -Behavior 2
-    Write-Host "  ✓ Negative case: Account table added with shell-only behavior (API converts to behavior 1)" -ForegroundColor Green
+    Set-DataverseSolutionComponent -SolutionName "ValidationTest_Behavior1" -ComponentId $accountEntity.MetadataId -ComponentType 1 -Behavior 2
+    Write-Host "  ✓ Behavior case: Account table added with shell-only behavior request (API converts to behavior 1)" -ForegroundColor Green
 }
 
 #endregion
@@ -628,6 +645,25 @@ if ($TestOnly) {
                     
                     $errors | Should -BeNullOrEmpty -Because "ValidationTest_Negative1 is properly configured and should pass all validations"
                 }
+
+                It "DependencyOnSolutionNotAllowed - should not flag base-layer system dependency overlays" {
+                    $context = [PSCustomObject]@{
+                        solutionname = "TestSolution1"
+                        validdependencysolutionnames = @()
+                        ignoresolutionnames = @()
+                        solutionconfig = @{}
+                        validationMode = 'error'
+                        ruleMode = 'error'
+                    }
+
+                    $errors = @(& "$ttecDigitalRoot\validationrules\DependencyOnSolutionNotAllowed.ps1" $context)
+                    $targetFalsePositive = $errors | Where-Object {
+                        $_.Message -like "*PowerPages_RuntimeCoreDependencies*" -and
+                        $_.Message -like "*608861bc-50a4-4c5f-a02c-21fe1943e2cf*"
+                    }
+
+                    $targetFalsePositive | Should -BeNullOrEmpty -Because "base-layer dependency should resolve to system base instead of shell-only overlay solution"
+                }
             }
         }
     }
@@ -773,6 +809,25 @@ try {
                         $errors = @(validateSolutionInternal -solutionname "ValidationTest_Negative1" -validdependencysolutionnames @("ValidationTest_Positive1", "ValidationTest_Positive2") -ignoresolutionnames @())
                         $errors | Should -BeNullOrEmpty -Because "ValidationTest_Negative1 is properly configured and should pass all validations"
                     }
+
+                    It "DependencyOnSolutionNotAllowed - should not flag base-layer system dependency overlays" {
+                        $context = [PSCustomObject]@{
+                            solutionname = "TestSolution1"
+                            validdependencysolutionnames = @()
+                            ignoresolutionnames = @()
+                            solutionconfig = @{}
+                            validationMode = 'error'
+                            ruleMode = 'error'
+                        }
+
+                        $errors = @(& "$ttecDigitalRoot\validationrules\DependencyOnSolutionNotAllowed.ps1" $context)
+                        $targetFalsePositive = $errors | Where-Object {
+                            $_.Message -like "*PowerPages_RuntimeCoreDependencies*" -and
+                            $_.Message -like "*608861bc-50a4-4c5f-a02c-21fe1943e2cf*"
+                        }
+
+                        $targetFalsePositive | Should -BeNullOrEmpty -Because "base-layer dependency should resolve to system base instead of shell-only overlay solution"
+                    }
                     
                     It "ComponentIsUnmanagedNonCustom - should validate behavior 1 components (shell-only not testable via API)" {
                         # Basis: Behavior 1 (Do Not Include Subcomponents) should still be validated
@@ -780,7 +835,7 @@ try {
                         # The API converts behavior 2 to behavior 1, so we test that behavior 1 IS validated
                         
                         $context = [PSCustomObject]@{
-                            solutionname = "ValidationTest_Negative1"
+                            solutionname = "ValidationTest_Behavior1"
                             validdependencysolutionnames = @()
                             ignoresolutionnames = @()
                             solutionconfig = @{}
