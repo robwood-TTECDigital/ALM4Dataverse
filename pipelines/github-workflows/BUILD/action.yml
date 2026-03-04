@@ -38,9 +38,19 @@ runs:
         $ErrorActionPreference = 'Stop'
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
-        # Sanitize tag name by replacing invalid characters with underscores
-        # Valid characters: a-z, A-Z, 0-9, . - _ /
-        $tagName = "${{ inputs.build-number }}" -replace '[^a-zA-Z0-9._/-]', '_'
+        $rawBuildNumber = "${{ inputs.build-number }}"
+        $sanitizedBuildNumber = $rawBuildNumber `
+          -replace '[^a-zA-Z0-9._/-]', '-' `
+          -replace '\.{2,}', '-' `
+          -replace '/{2,}', '/'
+        $sanitizedBuildNumber = $sanitizedBuildNumber.Trim('/', '.')
+        if ($sanitizedBuildNumber.EndsWith('.lock')) {
+          $sanitizedBuildNumber = $sanitizedBuildNumber -replace '\.lock$', '-lock'
+        }
+        if ([string]::IsNullOrWhiteSpace($sanitizedBuildNumber)) {
+          throw "Build number '$rawBuildNumber' cannot be converted to a valid git tag value"
+        }
+        $tagName = $sanitizedBuildNumber
         git tag "$tagName"
         git push origin "$tagName"
       working-directory: ${{ github.workspace}}/self
