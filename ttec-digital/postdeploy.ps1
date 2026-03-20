@@ -5,6 +5,8 @@ Set-StrictMode -Version 3.0
 
 import-module $PSScriptRoot/common/alm.psm1
 
+$config = $context.Config
+
 
 [Hashtable] $portalconfig = @{}
 [Hashtable] $generalconfig = @{
@@ -32,10 +34,6 @@ get-item env:PORTALCONFIG_* | foreach-object {
 
 get-item env:CONFIG_* | foreach-object {
     $generalconfig[$_.Name -replace "CONFIG_", ""] = $_.Value
-}
-
-if ($config.Contains("OrgSettings")) {
-    deployOrgSettings -settings $config.OrgSettings
 }
 
 if ($config.Contains("DependencySolutions")) {

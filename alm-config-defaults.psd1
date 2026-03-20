@@ -9,7 +9,9 @@
         )
 
         # Called by `pipelines/scripts/deploy.ps1` before staging/importing solutions.
-        preDeploy  = @()
+        preDeploy  = @(
+            "[alm]/ttec-digital/predeploy.ps1"
+        )
 
         # Called by `pipelines/scripts/deploy.ps1` after publish customizations.
         postDeploy = @(
