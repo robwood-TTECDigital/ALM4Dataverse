@@ -17,6 +17,57 @@ function deleteUnneededCallbackRegistrations() {
     }
 }
 
+# Updates settings in "organization" table if any need to be changed.
+# Settings values should have key matching the columns in that table and value understood by the Xrm.Sdk.
+function deployOrgSettings([Parameter(Mandatory)][hashtable] $settings) {
+    
+    if ($settings.Count -eq 0) {
+        return
+    }
+
+    write-host "##[group]Deploying org settings"
+
+    $connection = getGlobalCrmConnection
+    $query = new-object Microsoft.Xrm.Sdk.Query.QueryExpression "organization"
+
+    $query.ColumnSet.AddColumns($settings.Keys)
+
+    $orgupdate = $connection.RetrieveMultiple($query).Entities[0]
+
+    foreach ($orgsettingkey in $settings.Keys) {
+
+        $oldvalue = $null
+        if ($orgupdate.Attributes.ContainsKey($orgsettingkey)) {
+            $oldvalue = $orgupdate[$orgsettingkey]
+        }
+        $newvalue = $settings[$orgsettingkey]
+
+        if ($newvalue -is [scriptblock]) {
+            $newvalue = & $newvalue
+            write-host "Dynamic value of ${orgsettingkey}: '$newvalue'"
+        }
+
+        if ($oldvalue -eq $newvalue) {
+            $orgupdate.Attributes.Remove($orgsettingkey) | out-null
+        }
+        else {
+            $orgupdate[$orgsettingkey] = $newvalue
+        }
+    }
+
+    if ($orgupdate.Attributes.Count -eq 1) {
+        write-host "No org settings need to be updated"
+    }
+    else {
+        write-host "Org settings need to be updated:"
+        $orgupdate.Attributes | format-table
+    }
+
+    $connection.Update($orgupdate)
+
+    write-host "##[endgroup]"
+}
+
 # Returns list of installed solutions
 # Unique Name:string, Managed:bool, Version:string, Solution Id
 function getInstalledSolutions() {
