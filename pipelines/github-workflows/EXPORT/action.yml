@@ -16,7 +16,11 @@ inputs:
     description: Vars
   secretsjson:
     required: true
-    description: Secrets    
+    description: Secrets
+  authtype:
+    required: false
+    default: ClientSecret
+    description: "Authentication type: ClientSecret (default) or WorkloadIdentityFederation"
 runs:
   using: composite
   steps:
@@ -61,6 +65,13 @@ runs:
       name: Power Platform Tool Installer
       with:
         add-tools-to-path: true
+    - name: Azure Login (Workload Identity Federation)
+      if: inputs.authtype == 'WorkloadIdentityFederation'
+      uses: azure/login@v2
+      with:
+        client-id: ${{ env.dataverseapplicationid }}
+        tenant-id: ${{ env.dataversetenantid }}
+        allow-no-subscriptions: true
     - shell: pwsh
       run: git config --system core.longpaths true      
     - uses: actions/checkout@v4
@@ -78,7 +89,12 @@ runs:
 
         $ErrorActionPreference = 'Stop'
         & ${{ github.action_path }}/../../scripts/installdependencies.ps1  
-        & ${{ github.action_path }}/../../scripts/connect.ps1 -ConnectionString "AuthType=ClientSecret;Url=${{ env.dataverseurl }};ClientId=${{ env.dataverseapplicationid }};ClientSecret=${{ env.dataverseclientsecret }};TenantId=${{ env.dataversetenantid }};RedirectUri=http://localhost;"      
+        if ("${{ inputs.authtype }}" -eq "ClientSecret") {
+            $env:AZURE_TENANT_ID = "${{ env.dataversetenantid }}"
+            $env:AZURE_CLIENT_ID = "${{ env.dataverseapplicationid }}"
+            $env:AZURE_CLIENT_SECRET = "${{ env.dataverseclientsecret }}"
+        }
+        & ${{ github.action_path }}/../../scripts/connect.ps1 -Url "${{ env.dataverseurl }}"
 
         new-item -type directory artifacts
         new-item -type directory temp

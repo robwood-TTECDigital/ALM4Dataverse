@@ -13,7 +13,7 @@ name: BUILD
 run-name: ${{ github.ref_name }}-${{ github.event.repository.pushed_at }}-${{ github.run_attempt }}
 jobs:
   job1:
-    runs-on: windows-2019
+    runs-on: windows-2025-vs2026
     name: BUILD
     concurrency:
       group: ${{ github.workflow }}

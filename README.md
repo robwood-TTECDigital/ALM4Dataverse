@@ -9,6 +9,7 @@ This fork adds:
 
 - backwards compatibility with the previous Dataverse-ALM implementation and a migration process to assist with updating configuration.
 - TTEC Digital proprietary extensions:
+   - GitHub (Actions) support with optional Workflow Identity Federation (no secrets)
    - Solution validation rules
    - Azure Synapse component management
    - Schema migration tracking.

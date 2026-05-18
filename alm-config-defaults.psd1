@@ -34,6 +34,6 @@
     }
 
     scriptDependencies = @{
-        "Rnwood.Dataverse.Data.PowerShell" = "2.18.0"
+        "Rnwood.Dataverse.Data.PowerShell" = "3.0.3"
     }
 }
