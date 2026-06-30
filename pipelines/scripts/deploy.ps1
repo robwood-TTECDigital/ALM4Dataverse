@@ -100,6 +100,7 @@ foreach ($solution in $solutions) {
         -InFile $solution.File `
         -Mode $mode `
         -TimeoutSeconds 600 `
+        -PublishWorkflows `
         -EnvironmentVariables $environmentVariables `
         -ConnectionReferences $connectionReferences `
         -OverwriteUnmanagedCustomizations:(-not $UseUnmanagedSolutions) `
