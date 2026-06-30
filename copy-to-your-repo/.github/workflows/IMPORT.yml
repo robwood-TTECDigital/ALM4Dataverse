@@ -1,21 +1,23 @@
+name: IMPORT
+
+# Manually triggered: builds the current source and deploys it as unmanaged
+# solutions into your development Dataverse environment.
+#
+# See docs/usage/importing-changes.md and docs/setup/github-setup.md
+
+run-name: Import ${{ github.ref_name }} by @${{ github.actor }}
+
 on:
   workflow_dispatch:
-permissions:
-  contents: write
-  id-token: write  # Required for Workload Identity Federation
-name: IMPORT
+
 jobs:
-  job1:
-    environment: DEV_${{ github.ref_name }}
-    runs-on: windows-2025-vs2026
-    name: IMPORT to DEV_${{ github.ref_name }}
-    concurrency:
-      group: ${{ github.workflow }}
-      cancel-in-progress: false
-    steps:
-      - uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/IMPORT@main
-        with:
-          authtype: WorkloadIdentityFederation  # or ClientSecret
-          environment: DEV_${{ github.ref_name }}
-          varsjson: ${{ toJSON(vars)}}
-          secretsjson: ${{ toJSON(secrets )}}
+  import:
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/import.yml@stable
+    with:
+      timeout-minutes: 360
+    permissions:
+      id-token: write
+    # Credentials are resolved automatically by the reusable workflow from either:
+    # 1) GitHub environment Dev-{branch} (default), or
+    # 2) repo-level prefixed secrets/variables (e.g. DEV_MAIN_* or PREFIX_*).
+    secrets: inherit

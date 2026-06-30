@@ -1,13 +1,13 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Migrates a legac- Dataverse ALM repository (GitHub) to the new ALM4Dataverse format.
+    Migrates a legacy GitHub Dataverse ALM repository to the current ALM4Dataverse GitHub setup.
 
 .DESCRIPTION
-    This script migrates a legacy Dataverse-ALM repository to the new ALM4Dataverse format for GitHub repositories.
+    This script migrates a legacy Dataverse-ALM repository to the current ALM4Dataverse format for GitHub repositories.
     It migrates:
     - almconfig.ps1 to alm-config.psd1
-    - GitHub workflow files to the new structure under pipelines/github-workflows/    
+    - GitHub workflow files to the upstream reusable workflow structure under .github/workflows/
     After successful migration, the original almconfig.ps1 file is renamed to almconfig.ps1.migrated.
 
 .PARAMETER WorkspacePath
@@ -111,7 +111,7 @@ else {
 }
 
 # Migrate GitHub workflow files
-$workflowMigrationResult = Invoke-WorkflowMigration -WorkspacePath $WorkspacePath
+$workflowMigrationResult = Invoke-WorkflowMigration -WorkspacePath $WorkspacePath -TemplateDirectory $TemplateDirectory
 
 if ($workflowMigrationResult.FilesMigrated.Count -gt 0) {
     Write-Host ""
@@ -139,7 +139,7 @@ if ($workflowMigrationResult.FilesMigrated.Count -gt 0) {
     foreach ($file in $workflowMigrationResult.FilesMigrated) {
         Write-Host "  - $file (backup: $file.migrated)" -ForegroundColor Gray
     }
-    Write-Host "  - Updated paths: github-actions-* → pipelines/github-workflows/*" -ForegroundColor Gray
+    Write-Host "  - Replaced with upstream reusable workflow stubs under .github/workflows/" -ForegroundColor Gray
 }
 
 Write-Host ""
@@ -159,6 +159,8 @@ Write-Host ""
 
 
 Write-Host "3. Test the migration:" -ForegroundColor Yellow
+Write-Host "   - Review .github/workflows/DEPLOY-main.yml and replace the example environments" -ForegroundColor Gray
+Write-Host "   - Review docs/setup/github-setup.md and docs/setup/github-variables.md" -ForegroundColor Gray
 Write-Host "   - Commit and push the changes to a feature branch" -ForegroundColor Gray
 Write-Host "   - Verify workflows run successfully with the new configuration" -ForegroundColor Gray
 Write-Host "   - Test EXPORT, BUILD, and DEPLOY workflows" -ForegroundColor Gray

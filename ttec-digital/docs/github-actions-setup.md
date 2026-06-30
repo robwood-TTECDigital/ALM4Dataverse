@@ -1,243 +1,144 @@
-# GitHub Actions Setup Guide
+# GitHub Actions Migration Guide
 
-This guide describes how to set up ALM4Dataverse for use with GitHub Actions, using **Workload Identity Federation (WIF)** — the recommended, secretless authentication method.
+This fork previously shipped its own GitHub Actions support, workflow templates, variable names, and migration path. Upstream ALM4Dataverse now provides first-party GitHub support, so the fork-specific GitHub setup is deprecated.
 
-> **Also supported**: Client secret authentication (see [Client Secret option](#client-secret-option)) for scenarios where WIF is not suitable.
+Use this guide to move repositories that were using the older TTEC Digital GitHub support onto the upstream GitHub workflow model.
 
-## Overview
+## Canonical docs
 
-The GitHub Actions setup involves:
+After migration, use the upstream docs as the source of truth:
 
-1. [Prerequisites](#1-prerequisites)
-2. [App Registration in Entra ID](#2-app-registration-in-entra-id)
-3. [Configure Federated Credentials](#3-configure-federated-credentials)
-4. [Create Application User in Dataverse](#4-create-application-user-in-dataverse)
-5. [GitHub Environments and Variables](#5-github-environments-and-variables)
-6. [Workflow Files](#6-workflow-files)
+- `docs/setup/github-setup.md`
+- `docs/setup/github-variables.md`
+- `docs/config/github-secrets.md`
 
----
+## What changed
 
-## 1. Prerequisites
+The old fork-specific GitHub support used:
 
-- Access to an Azure Entra ID (formerly Azure AD) tenant with permission to create App Registrations
-- Access to your Dataverse environments with System Administrator role
-- A GitHub repository containing your Dataverse solution source code and the workflow files from `copy-to-your-repo/.github/workflows/`
-- The ALM4Dataverse repository accessible as a GitHub Actions action source (public or accessible to your runner)
+- Workflow stubs that called `ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/*`
+- `DEPLOY.yml` with a matrix-based deployment model
+- Lowercase variables such as `dataverseurl`, `dataverseapplicationid`, and `dataversetenantid`
+- Fork-specific documentation in this folder
 
----
+The current upstream GitHub support uses:
 
-## 2. App Registration in Entra ID
+- Reusable workflows hosted by `ALM4Dataverse/ALM4Dataverse/.github/workflows/*`
+- `DEPLOY-main.yml` with one deploy job per environment and explicit promotion mode
+- Uppercase Azure variables such as `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `DATAVERSE_URL`
+- Either GitHub Environment scoped variables/secrets or prefixed repo-level credentials
 
-For each Dataverse environment, create a dedicated App Registration:
+## Migration steps
 
-1. Navigate to the [Azure Portal](https://portal.azure.com)
-2. Go to **Entra ID** > **App registrations**
-3. Click **New registration**
-4. Enter a name: `{ProjectName} - {EnvironmentName} - deployment` (e.g., `MyProject - PROD - deployment`)
-5. Select **Accounts in this organizational directory only**
-6. Click **Register**
-7. Note the **Application (client) ID** and **Directory (tenant) ID** — you will need these later
+### 1. Replace workflow files
 
-> **Tip**: Create separate App Registrations per environment (e.g., separate for Dev, TEST, UAT, PROD) to minimise blast radius.
+In your application repository, replace the old workflow files with the current templates from `copy-to-your-repo/.github/workflows/`.
 
----
+Expected result:
 
-## 3. Configure Federated Credentials
+- Keep `BUILD.yml`
+- Keep `EXPORT.yml`
+- Keep `IMPORT.yml`
+- Replace `DEPLOY.yml` with `DEPLOY-main.yml`
 
-Federated credentials allow GitHub Actions to authenticate as your App Registration without a client secret, using an OIDC token issued by GitHub.
+If you used the helper script:
 
-### 3.1 Choose a Subject Pattern
-
-The **subject** controls which GitHub Actions contexts can authenticate. Choose the pattern that best fits your security requirements:
-
-| Option | Subject pattern | Use case |
-|--------|----------------|----------|
-| **Environment (recommended)** | `repo:{org}/{repo}:environment:{environment-name}` | Scoped to a named GitHub Environment |
-| **Branch** | `repo:{org}/{repo}:ref:refs/heads/{branch}` | Scoped to a specific branch |
-| **Pull Request** | `repo:{org}/{repo}:pull_request` | Scoped to PR events |
-
-> **Recommendation**: Use environment-scoped subjects. This ties authentication to GitHub Environment protection rules, giving you approval gates that also enforce who can authenticate.
-
-The environment names used by the workflows in this project follow the patterns:
-- `DEV_{branch}` — export and import environments (e.g., `DEV_main`)
-- Custom — deployment environments (e.g., `SAT_main`, `UAT_main`, `PROD`)
-
-### 3.2 Add the Federated Credential
-
-For each App Registration and its corresponding GitHub environment:
-
-1. In the App Registration, go to **Certificates & secrets**
-2. Select the **Federated credentials** tab
-3. Click **Add credential**
-4. Select **GitHub Actions deploying Azure resources**
-5. Fill in the details:
-	- **Organisation**: Your GitHub organisation or username
-	- **Repository**: Your repository name (without the org prefix)
-	- **Entity type**: Select based on your choice above (e.g., **Environment**)
-	- **GitHub environment name** (if entity = Environment): e.g., `DEV_main`, `PROD`
-	- **Name**: A descriptive name, e.g., `GitHub-{org}-{repo}-{environment}` (alphanumeric and hyphens only)
-	- **Audience**: `api://AzureADTokenExchange` (default — do not change)
-6. Click **Add**
-
-#### Example: Environment-scoped (recommended)
-
-| Field | Value |
-|-------|-------|
-| Organisation | `my-org` |
-| Repository | `MyProject` |
-| Entity type | Environment |
-| Environment name | `PROD` |
-| Issuer | `https://token.actions.githubusercontent.com` |
-| Subject | `repo:my-org/MyProject:environment:PROD` |
-
-#### Example: Branch-scoped
-
-| Field | Value |
-|-------|-------|
-| Organisation | `my-org` |
-| Repository | `MyProject` |
-| Entity type | Branch |
-| Branch | `main` |
-| Issuer | `https://token.actions.githubusercontent.com` |
-| Subject | `repo:my-org/MyProject:ref:refs/heads/main` |
-
-📖 **References**:
-- [Configure a federated identity credential for a GitHub deployment](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust?pivots=identity-wif-apps-methods-azcli#github-actions)
-- [Workload Identity Federation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)
-
----
-
-## 4. Create Application User in Dataverse
-
-For each Dataverse environment, create an application user for the App Registration:
-
-1. Navigate to [Power Platform Admin Center](https://admin.powerplatform.microsoft.com)
-2. Select your environment
-3. Go to **Settings** > **Users + permissions** > **Application users**
-4. Click **New app user**
-5. Click **Add an app** and search for your App Registration by name
-6. Select the **Business Unit** (typically root)
-7. Add the **System Administrator** security role
-8. Click **Create**
-
-📖 **Reference**: [Create an application user](https://learn.microsoft.com/en-us/power-platform/admin/manage-application-users)
-
----
-
-## 5. GitHub Environments and Variables
-
-### 5.1 Create GitHub Environments
-
-The workflows use GitHub Environments to scope credentials and optionally enforce approval gates.
-
-For each environment (e.g., `DEV_main`, `SAT_main`, `PROD`):
-
-1. In your GitHub repository, go to **Settings** > **Environments**
-2. Click **New environment**
-3. Enter the environment name (must match the federated credential subject you configured)
-4. Optionally add protection rules:
-	- **Required reviewers** — for non-dev environments, add deployment approvers
-	- **Deployment branches** — restrict to specific branches
-
-### 5.2 Set Environment Variables
-
-For each GitHub Environment, add the following variables:
-
-| Variable name | Description | Example value |
-|---------------|-------------|---------------|
-| `dataverseurl` | Dataverse environment URL | `https://yourorg-dev.crm.dynamics.com` |
-| `dataverseapplicationid` | App Registration (client) ID | `3004eb1e-7a00-45e0-a1dc-6703735eac18` |
-| `dataversetenantid` | Entra ID tenant ID | `d0b7d94e-4e91-4a0e-854b-2e43c9e2a27f` |
-
-> **Note**: Variable names are case-sensitive. Use lowercase as shown above.
-
-To add variables to a GitHub Environment:
-
-1. Go to **Settings** > **Environments** > *{EnvironmentName}*
-2. Under **Environment variables**, click **Add variable**
-3. Add each variable above
-
-### 5.3 Connection References and Environment Variables
-
-For Dataverse connection references and environment variable values set during deployment, add additional variables following the naming conventions in [environment-variable-group.md](../config/environment-variable-group.md) — the same `DataverseConnRef_*` and `DataverseEnvVar_*` prefixes apply; add them to the corresponding GitHub Environment.
-
-### 5.4 Client Secret Option
-
-If you are using **client secret** authentication instead of WIF:
-
-1. Add a secret to the GitHub Environment (or repository secrets):
-
-	| Secret name | Description |
-	|-------------|-------------|
-	| `dataverseclientsecret` | Client secret value from the App Registration |
-
-2. In your workflow files, change `authtype: WorkloadIdentityFederation` to `authtype: ClientSecret`
-3. Remove `id-token: write` from the workflow permissions (it is no longer needed)
-
----
-
-## 6. Workflow Files
-
-Copy the files from `copy-to-your-repo/.github/workflows/` into the `.github/workflows/` folder of your application repository.
-
-### Required permissions
-
-For WIF to work, each workflow that connects to Dataverse **must** include the `id-token: write` permission. This is already set in the example files:
-
-```yaml
-permissions:
-  contents: write
-  id-token: write  # Required for Workload Identity Federation
+```powershell
+pwsh -File ttec-digital/migrate-github-repo.ps1 -WorkspacePath c:\repos\my-dataverse-project
 ```
 
-> **Important**: `id-token: write` must be set in the **calling workflow**, not just the composite action. Do not remove it.
+Review the generated `DEPLOY-main.yml` afterwards and replace the example environments with your real deployment stages.
 
-### Workflow summary
+### 2. Update workflow references
 
-| File | Trigger | Purpose |
-|------|---------|---------|
-| `BUILD.yml` | Push / `workflow_dispatch` | Pack solutions into release artifacts |
-| `EXPORT.yml` | `workflow_dispatch` | Export solution changes from a Dev environment |
-| `DEPLOY.yml` | After BUILD / `workflow_dispatch` | Deploy artifacts to each environment |
-| `IMPORT.yml` | `workflow_dispatch` | Import solutions into a Dev environment |
-
-### Customising DEPLOY.yml
-
-Update the environment matrix in `DEPLOY.yml` to match your environments:
+Old fork-specific workflow references looked like this:
 
 ```yaml
-matrix:
-  environment: ["SAT_main", "UAT_main", "PROD"]
+uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/BUILD@main
 ```
 
-Each entry must match:
-- A GitHub Environment name (configured in step 5.1)
-- A federated credential subject in Entra ID (configured in step 3.2)
-- An `alm-config.psd1` environment reference (if applicable)
+The new workflow stubs call upstream reusable workflows like this:
 
----
+```yaml
+uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/build.yml@stable
+```
 
-## Troubleshooting
+Do not try to keep the old `pipelines/github-workflows/*` references. That layout is the part being retired.
 
-### `AADSTS70021: No matching federated identity record found`
+### 3. Rename GitHub environment conventions
 
-The OIDC token subject from GitHub does not match any federated credential configured on the App Registration. Verify that:
-- The GitHub Environment name in the workflow matches the subject in the federated credential exactly (case-sensitive)
-- The repository org/name is correct
-- The entity type (Environment vs Branch) matches what GitHub is presenting
+If you were using the old fork defaults, update your GitHub environment names:
 
-### `AADSTS700016: Application not found`
+| Old fork convention | Current upstream convention |
+| --- | --- |
+| `DEV_main` | `Dev-main` |
+| `SAT_main` | `TEST-main` or your chosen environment name |
+| `UAT_main` | `UAT-main` or your chosen environment name |
 
-The `dataverseapplicationid` variable does not match a registered application in Entra ID, or it is in the wrong tenant. Check the value in the GitHub Environment variable.
+Use the actual upstream workflow environment names in your workflows, federated credentials, and GitHub Environment configuration.
 
-### `DefaultAzureCredential authentication failed`
+### 4. Rename variables and secrets
 
-If `azure/login` succeeds but Dataverse connection fails, verify that the application user was created in the Dataverse environment with the System Administrator role.
+Map the old fork variable names to the new upstream names:
 
----
+| Old fork name | New upstream name |
+| --- | --- |
+| `dataverseurl` | `DATAVERSE_URL` |
+| `dataverseapplicationid` | `AZURE_CLIENT_ID` |
+| `dataversetenantid` | `AZURE_TENANT_ID` |
+| `dataverseclientsecret` | `AZURE_CLIENT_SECRET` |
 
-## See Also
+These values can now be stored either:
 
-- [Manual Setup Guide](../setup/manual-setup.md) — Azure DevOps setup
-- [Environment Variable Group Configuration](../config/environment-variable-group.md)
-- [Environment Service Connection Configuration](../config/environment-service-connection.md)
+- In GitHub Environments
+- As prefixed repo-level credentials described in `docs/setup/github-variables.md`
+
+Connection references and Dataverse environment variables should continue to use the `DataverseConnRef_*` and `DataverseEnvVar_*` naming pattern.
+
+### 5. Recreate federated credentials if you use WIF
+
+If you were using the fork's workload identity setup, recreate or update the Entra federated credentials so their subject matches the upstream environment naming.
+
+Current upstream subject format:
+
+```text
+repo:{owner}/{repo}:environment:{environment-name}
+```
+
+Example:
+
+```text
+repo:MyOrg/MyRepo:environment:Dev-main
+```
+
+### 6. Review deployment mode
+
+The old fork deploy flow was a single workflow with a matrix of environments. The upstream GitHub model is explicit per stage and supports two promotion modes:
+
+- `manual-gate-tag`
+- `environment-approval`
+
+Choose one mode per stage and configure `DEPLOY-main.yml` accordingly.
+
+### 7. Re-test the full path
+
+After updating workflows and variables:
+
+1. Run `IMPORT`
+2. Run `EXPORT`
+3. Verify `BUILD` triggers correctly
+4. Run `DEPLOY-main` manually or through automatic chaining, depending on your promotion mode
+
+## Recommended cleanup
+
+After your application repository is migrated:
+
+- Remove any custom references to `pipelines/github-workflows/*`
+- Remove old lowercase GitHub environment variables and secrets once the new workflows are confirmed working
+- Remove any local documentation that still instructs users to configure the fork-specific GitHub setup
+
+## See also
+
+- `docs/setup/github-setup.md`
+- `docs/setup/github-variables.md`
+- `docs/config/github-secrets.md`

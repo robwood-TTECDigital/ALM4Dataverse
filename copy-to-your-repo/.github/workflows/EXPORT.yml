@@ -1,26 +1,34 @@
+name: EXPORT
+
+# Manually triggered: exports Dataverse solutions from your development environment
+# and commits the unpacked changes back to this branch.
+#
+# See docs/usage/exporting-changes.md and docs/setup/github-setup.md
+
+run-name: Export ${{ github.ref_name }} by @${{ github.actor }}
+
 on:
   workflow_dispatch:
     inputs:
-      commitcomment:
-        type: string
+      commit-message:
+        description: 'Commit message for the exported changes'
         required: true
-        description: Describe the changes being exported. Include work item numbers.
+        type: string
+
 permissions:
   contents: write
-  id-token: write  # Required for Workload Identity Federation
-name: EXPORT
+  id-token: write
+  actions: write
+
 jobs:
-  job1:
-    runs-on: windows-2025-vs2026
-    name: EXPORT from ${{ format('DEV_{0}', github.ref_name) }}
-    environment: DEV_${{ github.ref_name }}
-    concurrency:
-      group: ${{ github.workflow }}
-      cancel-in-progress: false
-    steps:
-      - uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/EXPORT@main
-        with:
-         authtype: WorkloadIdentityFederation  # or ClientSecret
-         commitcomment: ${{ inputs.commitcomment }}
-         varsjson: ${{ toJSON(vars)}}
-         secretsjson: ${{ toJSON(secrets )}}
+  export:
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/export.yml@stable
+    permissions:
+      contents: write
+      id-token: write
+      actions: write
+    with:
+      commit-message: ${{ inputs.commit-message }}
+      timeout-minutes: 360
+
+    secrets: inherit

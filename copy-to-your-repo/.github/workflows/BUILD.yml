@@ -1,24 +1,32 @@
-on:
-  workflow_dispatch:
-  push:
-    branches: 
-    - main
-    tags-ignore: 
-    - '**'
-    paths-ignore: 
-    - .github/**
-permissions:
-  contents: write
 name: BUILD
-run-name: ${{ github.ref_name }}-${{ github.event.repository.pushed_at }}-${{ github.run_attempt }}
+
+# Triggers on every push to any branch.
+# Also supports manual runs and repository_dispatch from EXPORT.
+# Packs Dataverse solutions into deployable artifacts and tags the source commit.
+#
+# See docs/usage/building-releases.md and docs/setup/github-setup.md
+
+run-name: ${{ format('{0}-{1}-{2}-{3}', github.event.repository.name, (github.event_name == 'repository_dispatch' && github.event.client_payload.branch) || github.ref_name, (github.event_name == 'repository_dispatch' && github.event.client_payload.exported_at) || github.event.head_commit.timestamp || github.event.repository.updated_at || github.run_id, github.run_number) }}
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+  repository_dispatch:
+    types:
+      - alm4dataverse-export-build
+
 jobs:
-  job1:
-    runs-on: windows-2025-vs2026
-    name: BUILD
-    concurrency:
-      group: ${{ github.workflow }}
-      cancel-in-progress: false
-    steps:
-      - uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/BUILD@main
-        with:
-          build-number: ${{ github.ref_name }}-${{ github.event.repository.pushed_at }}-${{ github.run_attempt }}
+  build:
+    uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/build.yml@stable
+    with:
+      build-name: ${{ format('{0}-{1}-{2}-{3}', github.event.repository.name, (github.event_name == 'repository_dispatch' && github.event.client_payload.branch) || github.ref_name, (github.event_name == 'repository_dispatch' && github.event.client_payload.exported_at) || github.event.head_commit.timestamp || github.event.repository.updated_at || github.run_id, github.run_number) }}
+      source-branch: ${{ (github.event_name == 'repository_dispatch' && github.event.client_payload.branch) || github.ref_name }}
+      source-ref: ${{ (github.event_name == 'repository_dispatch' && github.event.client_payload.sha) || github.sha }}
+      environment-name: ''
+      timeout-minutes: 360
+    permissions:
+      contents: write
+      actions: write
+      id-token: write

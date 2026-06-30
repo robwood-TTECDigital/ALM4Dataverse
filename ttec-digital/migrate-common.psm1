@@ -518,23 +518,31 @@ function Invoke-ConfigMigration {
 function Invoke-WorkflowMigration {
     <#
     .SYNOPSIS
-        Migrates GitHub workflow files to use new action paths.
+        Migrates legacy fork GitHub workflow files to the upstream reusable workflow model.
     
     .DESCRIPTION
-        Updates workflow files in .github/workflows to change references from:
-        <org>/Dataverse-ALM/github-actions-<ACTION>@<ref>
-        to:
-        <org>/Dataverse-ALM/pipelines/github-workflows/<ACTION>@<ref>
+        Replaces legacy fork workflow stubs with the current workflow templates from
+        copy-to-your-repo/.github/workflows.
+
+        Existing workflow files are backed up with a .migrated suffix before replacement.
+        The generated DEPLOY-main.yml is a starter template and may need environment-specific
+        adjustments after migration.
     
     .PARAMETER WorkspacePath
         Path to the repository workspace root.
     
+    .PARAMETER TemplateDirectory
+        Path to the repository template root containing .github/workflows templates.
+
     .OUTPUTS
         Returns a hashtable with migration results including files migrated and warnings.
     #>
     param(
         [Parameter(Mandatory = $true)]
-        [string]$WorkspacePath
+        [string]$WorkspacePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TemplateDirectory
     )
     
     $result = @{
@@ -544,6 +552,11 @@ function Invoke-WorkflowMigration {
     }
     
     $workflowsPath = Join-Path $WorkspacePath '.github' 'workflows'
+    $templateWorkflowsPath = Join-Path $TemplateDirectory '.github' 'workflows'
+
+    if (-not (Test-Path $templateWorkflowsPath)) {
+        throw "Template workflows directory not found: $templateWorkflowsPath"
+    }
     
     if (-not (Test-Path $workflowsPath)) {
         Write-Host ""
@@ -551,50 +564,44 @@ function Invoke-WorkflowMigration {
         return $result
     }
     
-    # Get all YAML/YML files in workflows directory
-    $workflowFiles = Get-ChildItem -Path $workflowsPath -Filter '*.yml' -File -ErrorAction SilentlyContinue
-    $workflowFiles += Get-ChildItem -Path $workflowsPath -Filter '*.yaml' -File -ErrorAction SilentlyContinue
-    
-    if (-not $workflowFiles -or $workflowFiles.Count -eq 0) {
-        Write-Host ""
-        Write-Host "No workflow files found - skipping workflow migration" -ForegroundColor Gray
-        return $result
-    }
-    
     Write-Host "`nMigrating GitHub workflow files..." -ForegroundColor Cyan
     Write-Host "Workflows directory: $workflowsPath" -ForegroundColor Gray
     Write-Host ""
-    
-    # Pattern to match old action paths
-    # Captures: <org-name>/Dataverse-ALM/github-actions-<ACTION>@<ref>
-    # Action names: BUILD, DEPLOY, EXPORT, IMPORT
-    $pattern = '([\w-]+/Dataverse-ALM)/github-actions-(BUILD|DEPLOY|EXPORT|IMPORT)(@[\w.-]+)'
-    
-    foreach ($file in $workflowFiles) {
-        $content = Get-Content -Path $file.FullName -Raw -ErrorAction Stop
-        $originalContent = $content
-        
-        # Replace old paths with new paths
-        $newContent = $content -replace $pattern, '$1/pipelines/github-workflows/$2$3'
-        
-        if ($newContent -ne $originalContent) {
-            # Backup the original file
-            $backupPath = "$($file.FullName).migrated"
-            Copy-Item -Path $file.FullName -Destination $backupPath -Force
-            
-            # Write the updated content
-            Set-Content -Path $file.FullName -Value $newContent -NoNewline -Force
-            
-            $result.FilesMigrated += $file.Name
-            $result.AlreadyMigrated = $false
-            
-            Write-Host "  ✓ Migrated: $($file.Name)" -ForegroundColor Green
-            Write-Host "    Backup: $($file.Name).migrated" -ForegroundColor Gray
-        }
-        else {
-            Write-Host "  - No changes needed: $($file.Name)" -ForegroundColor Gray
+
+    $templateFiles = @('BUILD.yml', 'EXPORT.yml', 'IMPORT.yml', 'DEPLOY-main.yml')
+    $legacyFiles = @('BUILD.yml', 'EXPORT.yml', 'IMPORT.yml', 'DEPLOY.yml', 'DEPLOY-main.yml')
+
+    foreach ($fileName in $legacyFiles) {
+        $existingPath = Join-Path $workflowsPath $fileName
+        if (Test-Path $existingPath) {
+            $backupPath = "$existingPath.migrated"
+            Copy-Item -Path $existingPath -Destination $backupPath -Force
+            Write-Host "  Backed up: $fileName -> $($fileName).migrated" -ForegroundColor Gray
         }
     }
+
+    foreach ($fileName in $templateFiles) {
+        $sourcePath = Join-Path $templateWorkflowsPath $fileName
+        $destinationPath = Join-Path $workflowsPath $fileName
+
+        if (-not (Test-Path $sourcePath)) {
+            $result.Warnings += "Template workflow not found: $sourcePath"
+            continue
+        }
+
+        Copy-Item -Path $sourcePath -Destination $destinationPath -Force
+        $result.FilesMigrated += $fileName
+        $result.AlreadyMigrated = $false
+
+        Write-Host "  ✓ Replaced: $fileName" -ForegroundColor Green
+    }
+
+    $oldDeployPath = Join-Path $workflowsPath 'DEPLOY.yml'
+    if ((Test-Path $oldDeployPath) -and -not (Test-Path "$oldDeployPath.migrated")) {
+        $result.Warnings += 'Legacy DEPLOY.yml could not be backed up as expected.'
+    }
+
+    $result.Warnings += 'Review DEPLOY-main.yml and replace the example TEST-main/PROD stages with your real deployment environments.'
     
     return $result
 }

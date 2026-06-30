@@ -1,12 +1,14 @@
 # Service Connection Configuration
 
-This document describes the service connections that should be configured in Azure DevOps for each environment to support the ALM4Dataverse pipelines.
+This document describes service connection options for Azure DevOps environments used by ALM4Dataverse pipelines.
 
 ## Overview
 
-Service connections in Azure DevOps authenticate the pipelines to your Dataverse environments. ALM4Dataverse uses Power Platform service connections to connect to each environment during export and deployment operations.
+When `useAlm4DataverseExtension: true`, pipelines use Power Platform service connections and the ALM4Dataverse extension **Set Connection Variables** task.
 
-For detailed steps on creating service principals and service connections, see the [Manual Setup Guide](../setup/manual-setup.md#4-service-principal-setup).
+When `useAlm4DataverseExtension: false`, pipelines still use Power Platform service connections, but use Power Platform Build Tools **Set Connection Variables** task (`PowerPlatformSetConnectionVariables@2`). In this mode, only service-principal-with-secret authentication is available.
+
+For detailed steps on creating service principals and service connections, see the [Manual Setup Guide](../setup/azdo-manual-setup.md#4-service-principal-setup).
 
 ## Service Connection Type
 
@@ -35,7 +37,7 @@ Service connections follow the naming pattern used in the pipelines:
 
 ## Setting Up Service Connections
 
-See [Service Principal Setup](../setup/manual-setup.md#4-service-principal-setup) in the Manual Setup Guide for detailed instructions on:
+See [Service Principal Setup](../setup/azdo-manual-setup.md#4-service-principal-setup) in the Manual Setup Guide for detailed instructions on:
 
 1. Creating an App Registration in Entra ID
 2. Creating a client secret
@@ -66,16 +68,15 @@ See [Service Principal Setup](../setup/manual-setup.md#4-service-principal-setup
 
 ### Security
 
-- **System Administrator Role**: Assign the System Administrator security role to the application user in each Dataverse environment to allow solution import and export
-- **Dedicated Service Principals**: Create separate service principals for each environment (e.g., separate app registrations for Dev, TEST, UAT, and PROD)
-- **Client Secret Rotation**: Rotate client secrets periodically and track expiration dates to prevent authentication failures
-### Organization
+- **System Administrator Role**: Assign the System Administrator security role to the application user in each Dataverse environment to allow solution import and export.
+- **Dedicated Service Principals**: Create separate service principals for each environment (e.g. separate app registrations for Dev, TEST, UAT, and PROD).
+- **Client Secret Rotation**: Rotate client secrets periodically and track expiration dates to prevent authentication failures.
 
 ## Reference
 
-- [Manual Setup Guide - Service Principal Setup](../setup/manual-setup.md#4-service-principal-setup)
-- [Manual Setup Guide - Service Connections](../setup/manual-setup.md#5-service-connections)
-- [Environment Variable Group Configuration](environment-variable-group.md)
+- [Manual Setup Guide - Service Principal Setup](../setup/azdo-manual-setup.md#4-service-principal-setup)
+- [Manual Setup Guide - Service Connections](../setup/azdo-manual-setup.md#5-service-connections)
+- [Environment Variable Group Configuration](azdo-environment-variable-group.md)
 - [Create and use a service connection](https://learn.microsoft.com/en-us/azure/devops/pipelines/library/service-endpoints)
 - [Power Platform service connections](https://learn.microsoft.com/en-us/power-platform/alm/devops-build-tools#configure-service-connections-using-a-service-principal)
 - [Create an application user in Dataverse](https://learn.microsoft.com/en-us/power-platform/admin/manage-application-users)

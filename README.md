@@ -1,4 +1,5 @@
-# Dataverse-ALM 
+# Dataverse-ALM
+
 ## TTEC Digital fork of ALM4Dataverse
 
 This repo contains a TTEC Digital custom fork of the ALM4Dataverse OSS project.
@@ -6,32 +7,31 @@ See the main content from that project below for info on the bulk of what this d
 
 This fork adds:
 
-
 - backwards compatibility with the previous Dataverse-ALM implementation and a migration process to assist with updating configuration.
 - TTEC Digital proprietary extensions:
-   - GitHub (Actions) support with optional Workflow Identity Federation (no secrets)
-   - Solution validation rules
-   - Azure Synapse component management
-   - Schema migration tracking.
+  - Solution validation rules
+  - Azure Synapse component management
+  - Schema migration tracking.
 
+Upstream ALM4Dataverse now includes GitHub Actions support. The older fork-specific GitHub workflow model is deprecated.
+See `ttec-digital/docs/github-actions-setup.md` for migration guidance if you previously adopted the fork GitHub setup.
 
 See the docs in `ttec-digital/docs` for further info on these features.
 
-
 ## Upgrading from v1
 
-1) Clone your repo to a local workspace
+1. Clone your repo to a local workspace.
 
-2) Run either `ttec-digital/migrate-azdo-repo.ps1` or `ttec-digital/migrate-github-repo.ps1` with `-WorkspacePath pathto/workspace` pointing to the workspace folder.
+2. Run `ttec-digital/migrate-azdo-repo.ps1` for Azure DevOps based repos. If you were using the older fork-specific GitHub Actions support, use `ttec-digital/migrate-github-repo.ps1` and then follow `ttec-digital/docs/github-actions-setup.md` to complete the move to the upstream GitHub workflow model.
 
-3) Any custom pre/post X scripts may need to adapt slightly:
- - Scripts require `context` parameter instead of individual parameters. See the config docs.
- - Put PowerShell module requirements into `alm-config.psd1` and remove any commands to install and load them.
+3. Any custom pre/post X scripts may need to adapt slightly:
 
-4) Commit and push the changes back up to the remote.
+- Scripts require `context` parameter instead of individual parameters. See the config docs.
+- Put PowerShell module requirements into `alm-config.psd1` and remove any commands to install and load them.
+
+1. Commit and push the changes back up to the remote.
 
 ---
-
 ![ALM4Dataverse](logo.png)
 
 This repo contains:
@@ -39,11 +39,9 @@ This repo contains:
 implementation for Dataverse.
 - a set of process documentation and guidance on how to use and extend it.
 
-Currently to be used with Azure DevOps, but may be extended to GitHub in future (which is straightforward due to the way it is implemented).
-
+Supports both **Azure DevOps** and **GitHub Actions** (PREVIEW).
 
 Features:
-
 
 - Handles zero to many Dataverse solutions per repo.
 - Correctly determines the install/upgrade/update method for each solution based on the state of the target environment
@@ -51,39 +49,73 @@ Features:
 - Supports including config/system/lookup data
 - Easy to extend using the extensive PowerShell ecosystem.
 
+
 ## Getting Started
 
-1) [Run the automated setup process](docs/setup/automated-setup.md) to put in place the pipelines and other configuration needed.
+### GitHub Actions
 
-   Alternatively, if you prefer manual configuration, see the [Manual Setup Guide](docs/setup/manual-setup.md).
-    
+1) Run the automated setup script in Windows PowerShell:
+
+   ```powershell
+   iwr https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-github.ps1 | iex
+   ```
+
+    The setup script automatically detects whether GitHub environment approvals are
+    available for your repository and chooses the matching deployment strategy
+    (`environment-approval` or `manual-gate-tag` with prefixed repo-level credentials and manual promotion from stage 1).
+
+   Or follow the [GitHub Actions Setup Guide](docs/setup/github-setup.md) to configure manually.
+
+### Azure DevOps
+
+1) Run the automated setup script in Windows PowerShell:
+
+   ```powershell
+   iwr https://github.com/ALM4Dataverse/ALM4Dataverse/releases/latest/download/setup-azdo.ps1 | iex
+   ```
+
+   Or follow the [Manual Setup Guide](docs/setup/azdo-manual-setup.md) if you prefer manual configuration.
+   See the [Automated Setup Guide](docs/setup/azdo-automated-setup.md) for details.
+
 
 ## Documentation
 
+- [Frequently Asked Questions](docs/faqs.md)
+
 ### Initial Setup
 
+#### GitHub Actions
+- [GitHub Actions Setup Guide](docs/setup/github-setup.md)
+- [GitHub Variables & Secrets](docs/setup/github-variables.md)
+
+#### Azure DevOps
 - [Azure DevOps Organization Requirements](docs/setup/azdo-organisation-requirements.md)
-- [Automated Setup](docs/setup/automated-setup.md)
-- [Manual Setup](docs/setup/manual-setup.md)
+- [Automated Setup](docs/setup/azdo-automated-setup.md)
+- [Manual Setup](docs/setup/azdo-manual-setup.md)
 
 #### Usage Instructions
 
-- [Exporting changes](docs/usage/exporting-changes.md) - `EXPORT` pipeline
+- [Exporting changes](docs/usage/exporting-changes.md) - `EXPORT` pipeline/workflow
   Capturing changes from your dev environments into source control.
-- [Building releases](docs/usage/building-releases.md) - `BUILD` pipeline
+- [Building releases](docs/usage/building-releases.md) - `BUILD` pipeline/workflow
   Generating release assets for later deployment.
-- [Deploying](docs/usage/deploying.md) -`DEPLOY-<branchname>` pipeline
+- [Deploying](docs/usage/deploying.md) - `DEPLOY-<branchname>` pipeline/workflow
   Deploying release assets to environments in a controlled sequence
-- [Importing changes](docs/usage/importing-changes.md) - `IMPORT` pipeline
+- [Importing changes](docs/usage/importing-changes.md) - `IMPORT` pipeline/workflow
   Seeding or updating dev environment from source control.
 
 ### Configuration Reference
 
 - [ALM Configuration](docs/config/alm-config.md) - `alm-config.psd1`
-- [Environment Variable Group](docs/config/environment-variable-group.md)
-- [Service Connection Configuration](docs/config/environment-service-connection.md)
+
+#### GitHub Actions
+- [GitHub Secrets & Variables](docs/config/github-secrets.md)
+
+#### Azure DevOps
+- [Environment Variable Group](docs/config/azdo-environment-variable-group.md)
+- [Service Connection Configuration](docs/config/azdo-environment-service-connection.md)
 
 #### Example 'Hook' Extensions
 
-- [Data import and export](config/example-hooks/data-import-export.md) (for example config/system data)
-- [Organization/environment settings](config/example-hooks/organization-settings.md) (for example enabling the 'PCF allowed' switch)
+- [Data import and export](docs/config/example-hooks/data-import-export.md) (for example config/system data)
+- [Organisation/environment settings](docs/config/example-hooks/organization-settings.md) (for example enabling the 'PCF allowed' switch)

@@ -2,12 +2,12 @@
 
 This guide describes how to manually set up ALM4Dataverse using the Azure DevOps, Power Platform Admin Center and Entra ID user interfaces, without using the automated setup script.
 
-> **Note:** For automated setup, use the `setup.ps1` script instead. This manual guide is for users who prefer or require manual configuration.
+> **Note:** For automated setup, use the `setup-azdo.ps1` script instead. This manual guide is for users who prefer or require manual configuration.
 
 ## Prerequisites
 
-- Access to an Azure DevOps organization with the proper setup (see [Azure DevOps Organisation Requirements](azdo-organisation-requirements.md))
-- Project Administrator or Organization Owner permissions
+- Access to an Azure DevOps organisation with the proper setup (see [Azure DevOps Organisation Requirements](azdo-organisation-requirements.md))
+- Project Administrator or Organisation Owner permissions
 - Access to your Dataverse environments with System Administrator role
 - Ability to create App Registrations in Entra ID (Azure Active Directory)
 
@@ -41,7 +41,13 @@ The manual setup process involves:
 
 ---
 
-## 2. Repository Setup
+## 2. Install Power Platform Build Tools
+
+Before creating pipelines, ensure the required extensions are installed in your Azure DevOps organisation. See [Azure DevOps Organisation Requirements — Extensions](azdo-organisation-requirements.md#extensions) for installation steps.
+
+---
+
+## 3. Repository Setup
 
 You need two Git repositories in your project:
 
@@ -60,19 +66,19 @@ This repository contains the shared pipeline templates and scripts.
    cd ALM4Dataverse
    
    # Add the upstream repository as a remote
-   git remote add upstream https://github.com/rnwood/ALM4Dataverse.git
+   git remote add upstream https://github.com/ALM4Dataverse/ALM4Dataverse.git
    
-   # Fetch the stable tag
-   git fetch upstream stable
+   # Fetch only the stable tag from upstream (no other branches are imported)
+   git fetch upstream refs/tags/stable:refs/tags/stable
    
    # Create main branch from the stable tag
-   git checkout -b main upstream/stable
+   git checkout -b main stable
    
    # Push to your Azure DevOps repository
    git push origin main
    ```
 
-> **Note**: The 'stable' tag always points to the latest stable release. You can also use a specific version tag like `v1.0.0` instead of `stable` if you need to pin to a particular release. Find available releases at https://github.com/rnwood/ALM4Dataverse/releases
+> **Note**: The 'stable' tag always points to the latest stable release. You can also pin to a specific version tag (e.g., `v1.0.0`) by replacing `stable` with the version tag in the fetch and checkout commands (e.g., `git fetch upstream refs/tags/v1.0.0:refs/tags/v1.0.0` and `git checkout -b main v1.0.0`). Find available releases at https://github.com/ALM4Dataverse/ALM4Dataverse/releases
 
 📖 **Reference**: [Create a Git repo](https://learn.microsoft.com/en-us/azure/devops/repos/git/create-new-repo)
 
@@ -112,7 +118,7 @@ The Build Service needs Contribute permissions on your main repository to push c
 
 ---
 
-## 3. Service Principal Setup
+## 4. Service Principal Setup
 
 For each Dataverse environment (Dev, Test, UAT, Production, etc.), you need a Service Principal (App Registration) for authentication.
 
@@ -127,7 +133,7 @@ For each Dataverse environment (Dev, Test, UAT, Production, etc.), you need a Se
 1. Navigate to the [Azure Portal](https://portal.azure.com)
 2. Go to **Entra ID** (Azure Active Directory) > **App registrations**
 3. Click **New registration**
-4. Enter a name: `{ProjectName} - {EnvironmentName} - deployment` (e.g., "MyProject - PROD - deployment")
+   - Enter a name: `{ProjectName} - {EnvironmentName} - deployment` (e.g. `MyProject - PROD - deployment`)
 5. Select "Accounts in this organizational directory only"
 6. Click **Register**
 7. Note the **Application (client) ID** and **Directory (tenant) ID**
@@ -141,7 +147,7 @@ For each Dataverse environment (Dev, Test, UAT, Production, etc.), you need a Se
 3. Add a description: "ALM4Dataverse"
 4. Select an expiration period (note when it expires for renewal)
 5. Click **Add**
-6. **Important**: Copy the secret **Value** immediately (not the Secret ID) - you cannot view it again
+   - **Important**: Copy the secret **Value** immediately (not the Secret ID) — you cannot view it again.
 
 📖 **Reference**: [Add a client secret](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app#add-a-client-secret)
 
@@ -182,7 +188,7 @@ For each Dataverse environment, create an application user with the Service Prin
 
 ---
 
-## 4. Service Connections
+## 5. Service Connections
 
 Create a Service Connection for each Dataverse environment.
 
@@ -227,16 +233,16 @@ Create a Service Connection for each Dataverse environment.
 
 ---
 
-## 5. Variable Groups
+## 6. Variable Groups
 
-Variable groups store environment-specific configuration values. See the [Environment Variable Group documentation](../config/environment-variable-group.md) for detailed information about what variables to configure.
+Variable groups store environment-specific configuration values. See the [Environment Variable Group documentation](../config/azdo-environment-variable-group.md) for detailed information about what variables to configure.
 
 ### For Each Environment (Dev-main, TEST-main, UAT-main, PROD, etc.):
 
 1. Go to **Pipelines** > **Library**
 2. Click **+ Variable group**
 3. Name: `Environment-{EnvironmentName}` (e.g., `Environment-Dev-main`, `Environment-PROD`)
-4. Add the required variables (see [environment-variable-group.md](../config/environment-variable-group.md) for the full list)
+4. Add the required variables (see [azdo-environment-variable-group.md](../config/azdo-environment-variable-group.md) for the full list)
 5. Click **Save**
 
 ### Add Approval Check (for non-Dev environments):
@@ -262,7 +268,7 @@ Variable groups store environment-specific configuration values. See the [Enviro
 
 ---
 
-## 6. Environments and Approvals
+## 7. Environments and Approvals
 
 For deployment environments (not Dev), create Azure DevOps environments with approval checks.
 
@@ -286,7 +292,7 @@ For deployment environments (not Dev), create Azure DevOps environments with app
 
 ---
 
-## 7. Pipeline Creation
+## 8. Pipeline Creation
 
 Create four pipelines for your main repository.
 
@@ -328,7 +334,7 @@ Create four pipelines for your main repository.
 
 ---
 
-## 8. Pipeline Permissions
+## 9. Pipeline Permissions
 
 Each pipeline needs permissions to access repositories, service connections, variable groups, and environments.
 
@@ -384,7 +390,7 @@ For **DEPLOY** pipeline:
 
 ---
 
-## 9. Solution Configuration
+## 10. Solution Configuration
 
 ### 9.1 Configure Solutions in alm-config.psd1
 
@@ -400,13 +406,25 @@ Edit the `alm-config.psd1` file in your main repository to list the solutions yo
         @{
             name = 'AnotherSolution'
             deployUnmanaged = $false
+         solutionCheck = @{ enabled = $true; failThreshold = 'High' }
         }
     )
+
+   # Optional global PAC solution check settings used by BUILD.
+   solutionCheck = @{
+      enabled = $true
+      geo = 'Europe'
+      failThreshold = 'Critical'
+      maxParallel = 4
+   }
 }
 ```
 
 - `name`: The unique name of your Dataverse solution
 - `deployUnmanaged`: Set to `$true` if you want to deploy as unmanaged (typically only for Dev), `$false` for managed
+- `solutionCheck` (optional): Per-solution PAC checker settings merged with global `solutionCheck` settings
+
+If solution check is enabled, BUILD authenticates PAC using managed identity / existing Azure identity context and fails clearly if no non-interactive Azure sign-in context is available.
 
 ### 9.2 Configure Deployment Environments
 

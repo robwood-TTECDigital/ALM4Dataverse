@@ -26,9 +26,13 @@ Alternatively, you can configure your organisation with at least one paid "paral
 
 ## Extensions
 
-## Power Platform Build Tools
+### Power Platform Build Tools
 
-The Power Platform Build Tools extension is required for the pipelines to work. It provides the PAC CLI.
+The Power Platform Build Tools extension is required for the pipelines to work.
+
+ALM4Dataverse installs `pac` in the pipeline via `installdependencies.ps1` and pins the version with `pacCliVersion` from `alm-config.psd1` / `alm-config-defaults.psd1`.
+
+In the shipped Azure DevOps templates, `PowerPlatformToolInstaller@2` is configured with `AddToolsToPath: false` to avoid the PPBT-provided `pac` version overriding the pinned one.
 
 1. Navigate to the Azure DevOps Marketplace: [Power Platform Build Tools](https://marketplace.visualstudio.com/items?itemName=microsoft-IsvExpTools.PowerPlatform-BuildTools)
 2. Click "Get it free"
@@ -39,7 +43,11 @@ The Power Platform Build Tools extension is required for the pipelines to work. 
 
 ## ALM4Dataverse AzDO Extensions
 
-The ALM4Dataverse AzDO Extensions extension is required for the pipelines to work. It provides the authentication task that allows ALM4Dataverse to work flexibly with different modern authentication schemes.
+The ALM4Dataverse AzDO Extensions extension is optional.
+
+- **Required** when using Workload Identity Federation (WIF)
+- **Required** when `useAlm4DataverseExtension: true`
+- **Optional** when `useAlm4DataverseExtension: false` (pipelines use PPBT Set Connection Variables with service-principal secret auth)
 
 1. Navigate to the Azure DevOps Marketplace: [ALM4Dataverse Azure DevOps Extensions](https://marketplace.visualstudio.com/items?itemName=ALM4Dataverse.alm4dataverse-azdo-extensions)
 2. Click "Get it free"
@@ -47,4 +55,3 @@ The ALM4Dataverse AzDO Extensions extension is required for the pipelines to wor
 4. Click "Install"
 
 📖 **Reference**: [Install extensions](https://learn.microsoft.com/en-us/azure/devops/marketplace/install-extension)
-

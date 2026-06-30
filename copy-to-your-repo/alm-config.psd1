@@ -3,10 +3,10 @@
     #
     # Paths in this file are relative to the directory this file is in (the repo root).
     #
-    # DEFAULT CONFIGURATION:
-    # To add default configuration for all repos using the shared repo, edit the alm-config-defaults.psd1 file
+    # FORK CONFIGURATION:
+    # To customize this configuration in a fork, create a fork-almconfig.psd1 file
     # in the ALM4Dataverse repository root.
-    # Default configuration is merged with this file (this file's values take precedence).
+    # Fork configuration is merged with this file (this file's values take precedence).
     # Arrays are concatenated, hashtables are merged.
     # This allows forks to add custom defaults without modifying this template.
     #
@@ -24,36 +24,26 @@
     # - serviceAccountUpnConfigKey: (optional) name of the environment configuration key containing
     #   the service account UPN to use when activating processes in this solution.
     #   The default is 'DataverseServiceAccountUpn'
-    # - validationMode: (optional) 'error' (default), 'warning', or 'disabled'. Controls validation behavior for this solution.
-    #   - 'error': Validation failures cause pipeline to fail (default behavior)
-    #   - 'warning': Validation failures are reported as warnings only
-    #   - 'disabled': No validation is performed
-    # - skipValidationRules: (optional) array of validation rules to configure. Each entry is a hashtable with:
-    #   - ruleName: (required) name of the validation rule (e.g., 'ComponentInMoreThanOneUnmanagedSolution')
-    #   - mode: (optional) 'skip' (default) or 'warning'. Controls behavior for this rule.
-    #   - componentType: (optional) apply only for this component type number (e.g., 1 for entities)
-    #   - componentId: (optional) apply only for this specific component GUID
-    #   - componentSchemaName: (optional) apply only for component with this schema name
-    #
-    # Example with validation configurations:
-    # @{
-    #     name = 'MySolution'
-    #     validationMode = 'warning'  # All validation issues become warnings
-    #     skipValidationRules = @(
-    #         # Skip entire rule for this solution
-    #         @{ ruleName = 'SolutionUsesSystemPublisher'; mode = 'skip' }
-    #         # Warning mode for specific rule (errors become warnings)
-    #         @{ ruleName = 'ComponentInMoreThanOneUnmanagedSolution'; mode = 'warning' }
-    #         # Skip rule for specific component type (1 = entity)
-    #         @{ ruleName = 'ComponentSchemaNamePrefixDoesNotMatchPublisherPrefix'; componentType = 1; mode = 'skip' }
-    #         # Warning for specific component by ID
-    #         @{ ruleName = 'DependencyOnSolutionNotAllowed'; componentType = 1; componentId = 'guid-here'; mode = 'warning' }
-    #         # Skip for specific component by schema name
-    #         @{ ruleName = 'EnvironmentVariableCurrentValueInSolution'; componentType = 380; componentSchemaName = 'legacy_component'; mode = 'skip' }
-    #     )
-    # }
-    # See ttec-digital/docs/solution-validation.md for complete documentation
+    # - solutionCheck: (optional) per-solution PAC checker settings merged with global solutionCheck
+    #   settings below. Use enabled = $false to skip checker for a specific solution.
     solutions = @(
+        # Example:
+        # @{
+        #   name = 'ContosoCore'
+        #   solutionCheck = @{
+        #     enabled = $true
+        #     # Use 'none' to omit --ruleSet.
+        #     ruleSet = 'none'
+        #     # Globs are expanded to concrete files before calling pac.
+        #     excludedFiles = @(
+        #       'CanvasApps/**/*.msapp'
+        #     )
+        #     ruleLevelOverride = @(
+        #       @{ Id = 'meta-remove-dup-reg'; OverrideLevel = 'Medium' }
+        #     )
+        #     failThreshold = 'High'
+        #   }
+        # }
     )
 
 
@@ -126,4 +116,40 @@
         # Example:
         # 'PnP.PowerShell' = '1.12.0'
     }
+
+    # Power Apps CLI version used by pipeline scripts.
+    # Optional override. Defaults from ALM4Dataverse are used when omitted.
+    # Supports: '' (latest stable), 'prerelease', or a specific version.
+    # pacCliVersion = '2.7.4'
+
+    # Timeout in seconds for each solution import operation (default: 10800).
+    # Increase this value if solution imports time out in large or complex environments.
+    # importTimeoutSeconds = 10800
+
+    # PAC solution check settings used by BUILD.
+    # Set enabled = $true globally or per-solution to activate checks.
+    # Per-solution settings are merged with these global settings.
+    #
+    # Supported severities for failThreshold and OverrideLevel:
+    # Critical, High, Medium, Low, Informational.
+    #
+    # ruleSet values:
+    # - 'Solution Checker' (default)
+    # - 'AppSource Certification'
+    # - GUID
+    # - 'none' (do not pass --ruleSet)
+    #
+    # solutionCheck = @{
+    #     enabled = $true
+    #     geo = 'Europe'
+    #     failThreshold = 'Critical'
+    #     ruleSet = 'Solution Checker'
+    #     excludedFiles = @(
+    #         'WebResources/**/*.png'
+    #     )
+    #     ruleLevelOverride = @(
+    #         @{ Id = 'meta-remove-dup-reg'; OverrideLevel = 'Medium' }
+    #     )
+    #     maxParallel = 4
+    # }
 }
