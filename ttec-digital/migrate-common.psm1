@@ -518,7 +518,7 @@ function Invoke-ConfigMigration {
 function Invoke-WorkflowMigration {
     <#
     .SYNOPSIS
-        Migrates legacy fork GitHub workflow files to the upstream reusable workflow model.
+        Migrates legacy fork GitHub workflow files to the upstream composite-action model.
     
     .DESCRIPTION
         Replaces legacy fork workflow stubs with the current workflow templates from

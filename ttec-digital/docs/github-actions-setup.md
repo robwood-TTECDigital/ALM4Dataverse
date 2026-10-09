@@ -23,7 +23,7 @@ The old fork-specific GitHub support used:
 
 The current upstream GitHub support uses:
 
-- Reusable workflows hosted by `ALM4Dataverse/ALM4Dataverse/.github/workflows/*`
+- Composite actions hosted by `ALM4Dataverse/ALM4Dataverse/.github/actions/*`
 - `DEPLOY-main.yml` with one deploy job per environment and explicit promotion mode
 - Uppercase Azure variables such as `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `DATAVERSE_URL`
 - Either GitHub Environment scoped variables/secrets or prefixed repo-level credentials
@@ -57,10 +57,10 @@ Old fork-specific workflow references looked like this:
 uses: ttecdigital-msba-emea/Dataverse-ALM/pipelines/github-workflows/BUILD@main
 ```
 
-The new workflow stubs call upstream reusable workflows like this:
+The new workflow stubs call upstream composite actions like this:
 
 ```yaml
-uses: ALM4Dataverse/ALM4Dataverse/.github/workflows/build.yml@stable
+uses: ALM4Dataverse/ALM4Dataverse/.github/actions/build@main
 ```
 
 Do not try to keep the old `pipelines/github-workflows/*` references. That layout is the part being retired.

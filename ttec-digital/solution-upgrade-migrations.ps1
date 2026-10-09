@@ -3,6 +3,7 @@ param($context)
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 3.0
 
+& $PSScriptRoot/common/load-dataverse-sdk.ps1
 Import-Module $PSScriptRoot/common/alm.psm1
 
 $config = $context.Config

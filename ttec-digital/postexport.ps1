@@ -6,6 +6,7 @@ Set-StrictMode -Version 3.0
 $config = $context.Config
 $SourceDirectory = $context.SourceDirectory
 
+& $PSScriptRoot/common/load-dataverse-sdk.ps1
 Import-Module $PSScriptRoot/common/alm.psm1
 
 if (-not (test-path data) ) {

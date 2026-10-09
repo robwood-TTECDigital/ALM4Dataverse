@@ -7,7 +7,7 @@
     This script migrates a legacy Dataverse-ALM repository to the current ALM4Dataverse format for GitHub repositories.
     It migrates:
     - almconfig.ps1 to alm-config.psd1
-    - GitHub workflow files to the upstream reusable workflow structure under .github/workflows/
+    - GitHub workflow files to the upstream composite-action structure under .github/workflows/
     After successful migration, the original almconfig.ps1 file is renamed to almconfig.ps1.migrated.
 
 .PARAMETER WorkspacePath
@@ -139,7 +139,7 @@ if ($workflowMigrationResult.FilesMigrated.Count -gt 0) {
     foreach ($file in $workflowMigrationResult.FilesMigrated) {
         Write-Host "  - $file (backup: $file.migrated)" -ForegroundColor Gray
     }
-    Write-Host "  - Replaced with upstream reusable workflow stubs under .github/workflows/" -ForegroundColor Gray
+    Write-Host "  - Replaced with upstream composite-action workflow stubs under .github/workflows/" -ForegroundColor Gray
 }
 
 Write-Host ""
