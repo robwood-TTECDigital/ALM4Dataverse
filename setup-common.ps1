@@ -5,6 +5,223 @@ function New-DirectoryIfMissing {
     }
 }
 
+function Expand-SetupConsoleArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [Parameter(Mandatory)][string]$DestinationPath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ArchivePath, $DestinationPath)
+}
+
+function Get-SetupConsoleDependencyAssemblyPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)][string]$PackageName,
+        [Parameter(Mandatory)][string]$PackageVersion,
+        [Parameter(Mandatory)][string]$TargetFramework,
+        [Parameter(Mandatory)][string]$AssemblyName
+    )
+
+    $expandedRoot = Join-Path $PackageRoot "$PackageName.$PackageVersion"
+    $packagePath = Join-Path $PackageRoot "$PackageName.$PackageVersion.nupkg"
+    $assemblyPath = Join-Path $expandedRoot "lib\$TargetFramework\$AssemblyName.dll"
+    $packageUrl = "https://www.nuget.org/api/v2/package/$PackageName/$PackageVersion"
+
+    if (-not (Test-Path -LiteralPath $assemblyPath)) {
+        if (Test-Path -LiteralPath $expandedRoot) {
+            Remove-Item -LiteralPath $expandedRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        if (-not (Test-Path -LiteralPath $packagePath)) {
+            try {
+                if ($PSVersionTable.PSVersion.Major -lt 6) {
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                }
+            }
+            catch {
+                # Non-fatal; continue.
+            }
+
+            Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
+        }
+
+        try {
+            Expand-SetupConsoleArchive -ArchivePath $packagePath -DestinationPath $expandedRoot
+        }
+        catch {
+            Remove-Item -LiteralPath $expandedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
+            Expand-SetupConsoleArchive -ArchivePath $packagePath -DestinationPath $expandedRoot
+        }
+
+        if (-not (Test-Path -LiteralPath $assemblyPath)) {
+            Remove-Item -LiteralPath $expandedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
+            Expand-SetupConsoleArchive -ArchivePath $packagePath -DestinationPath $expandedRoot
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $assemblyPath)) {
+        throw "Could not locate $AssemblyName.dll after extracting package $PackageName version $PackageVersion."
+    }
+
+    return $assemblyPath
+}
+
+function Initialize-SetupConsoleFrameworkDependencies {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$PackageRoot
+    )
+
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        return
+    }
+
+    # Spectre.Console 0.49.1 targets netstandard2.0 and depends on the .NET
+    # Framework builds of these packages when running in Windows PowerShell.
+    $dependencies = @(
+        [pscustomobject]@{
+            PackageName      = 'System.Runtime.CompilerServices.Unsafe'
+            PackageVersion   = '4.5.3'
+            TargetFramework  = 'net461'
+            AssemblyName     = 'System.Runtime.CompilerServices.Unsafe'
+        },
+        [pscustomobject]@{
+            PackageName      = 'System.Buffers'
+            PackageVersion   = '4.5.1'
+            TargetFramework  = 'net461'
+            AssemblyName     = 'System.Buffers'
+        },
+        [pscustomobject]@{
+            PackageName      = 'System.Numerics.Vectors'
+            PackageVersion   = '4.5.0'
+            TargetFramework  = 'net46'
+            AssemblyName     = 'System.Numerics.Vectors'
+        },
+        [pscustomobject]@{
+            PackageName      = 'System.Memory'
+            PackageVersion   = '4.5.5'
+            TargetFramework  = 'net461'
+            AssemblyName     = 'System.Memory'
+        }
+    )
+
+    foreach ($dependency in $dependencies) {
+        $assemblyPath = Get-SetupConsoleDependencyAssemblyPath `
+            -PackageRoot $PackageRoot `
+            -PackageName $dependency.PackageName `
+            -PackageVersion $dependency.PackageVersion `
+            -TargetFramework $dependency.TargetFramework `
+            -AssemblyName $dependency.AssemblyName
+
+        $alreadyLoaded = [AppDomain]::CurrentDomain.GetAssemblies() | Where-Object {
+            $_.GetName().Name -eq $dependency.AssemblyName
+        } | Select-Object -First 1
+
+        if (-not $alreadyLoaded) {
+            Add-Type -Path $assemblyPath -ErrorAction Stop
+        }
+    }
+}
+
+function Initialize-SetupConsoleCancellationSupport {
+    [CmdletBinding()]
+    param()
+
+    $typeName = 'ALM4Dataverse.SetupConsoleCancellation'
+    $cancellationType = ([System.Management.Automation.PSTypeName]$typeName).Type
+    if ($null -ne $cancellationType) {
+        return $cancellationType
+    }
+
+    $typeDefinition = @(
+        'using System;'
+        'using System.Threading;'
+        'namespace ALM4Dataverse {'
+        '    public static class SetupConsoleCancellation {'
+        '        private static readonly object SyncRoot = new object();'
+        '        private static readonly ConsoleCancelEventHandler CancelHandler = OnCancel;'
+        '        private static CancellationTokenSource ActiveSource;'
+        ''
+        '        public static CancellationTokenSource Start() {'
+        '            lock (SyncRoot) {'
+        '                if (ActiveSource != null) {'
+        '                    throw new InvalidOperationException("A setup console cancellation handler is already active.");'
+        '                }'
+        ''
+        '                var source = new CancellationTokenSource();'
+        '                ActiveSource = source;'
+        '                try {'
+        '                    Console.CancelKeyPress += CancelHandler;'
+        '                }'
+        '                catch {'
+        '                    ActiveSource = null;'
+        '                    source.Dispose();'
+        '                    return null;'
+        '                }'
+        ''
+        '                return source;'
+        '            }'
+        '        }'
+        ''
+        '        public static void Stop(CancellationTokenSource source) {'
+        '            if (source == null) {'
+        '                return;'
+        '            }'
+        ''
+        '            lock (SyncRoot) {'
+        '                if (object.ReferenceEquals(ActiveSource, source)) {'
+        '                    ActiveSource = null;'
+        '                    try {'
+        '                        Console.CancelKeyPress -= CancelHandler;'
+        '                    }'
+        '                    catch {'
+        '                    }'
+        '                }'
+        '            }'
+        ''
+        '            source.Dispose();'
+        '        }'
+        ''
+        '        private static void OnCancel(object sender, ConsoleCancelEventArgs eventArgs) {'
+        '            CancellationTokenSource source;'
+        '            lock (SyncRoot) {'
+        '                source = ActiveSource;'
+        '            }'
+        ''
+        '            if (source == null) {'
+        '                return;'
+        '            }'
+        ''
+        '            eventArgs.Cancel = true;'
+        '            try {'
+        '                source.Cancel();'
+        '            }'
+        '            catch (ObjectDisposedException) {'
+        '            }'
+        '            catch {'
+        '            }'
+        '        }'
+        '    }'
+        '}'
+    ) -join [Environment]::NewLine
+
+    Add-Type -TypeDefinition $typeDefinition -ErrorAction Stop
+    $cancellationType = ([System.Management.Automation.PSTypeName]$typeName).Type
+    if ($null -eq $cancellationType) {
+        throw "Could not initialize setup console cancellation support type '$typeName'."
+    }
+
+    return $cancellationType
+}
+
 function Initialize-SpectreConsole {
     [CmdletBinding()]
     param()
@@ -22,14 +239,30 @@ function Initialize-SpectreConsole {
         # Continue and load the assembly from the NuGet package.
     }
 
-    $spectreVersion = '0.53.1'
+    # Spectre.Console 0.50+ uses a System.Memory build that references .NET 8
+    # framework assemblies. That works in PowerShell 7, but Windows PowerShell
+    # 5.1 runs on .NET Framework and cannot load those references. Keep the
+    # historically compatible package for Windows PowerShell.
+    $spectreVersion = if ($PSVersionTable.PSEdition -eq 'Core') { '0.53.1' } else { '0.49.1' }
     $packageRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'ALM4Dataverse\SpectreConsole'
     $expandedRoot = Join-Path $packageRoot $spectreVersion
     $packagePath = Join-Path $packageRoot "Spectre.Console.$spectreVersion.nupkg"
 
     New-DirectoryIfMissing -Path $packageRoot
 
-    if (-not (Test-Path -LiteralPath $expandedRoot)) {
+    $hasExtractedAssembly = $false
+    if (Test-Path -LiteralPath $expandedRoot) {
+        $hasExtractedAssembly = $null -ne (Get-ChildItem -LiteralPath $expandedRoot -Recurse -Filter 'Spectre.Console.dll' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    }
+
+    if (-not $hasExtractedAssembly) {
+        # An interrupted or otherwise incomplete extraction can leave the destination
+        # directory behind. Do not treat that directory as a valid cache entry.
+        if (Test-Path -LiteralPath $expandedRoot) {
+            Remove-Item -LiteralPath $expandedRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        $packageUrl = "https://www.nuget.org/api/v2/package/Spectre.Console/$spectreVersion"
         if (-not (Test-Path -LiteralPath $packagePath)) {
             try {
                 if ($PSVersionTable.PSVersion.Major -lt 6) {
@@ -40,11 +273,28 @@ function Initialize-SpectreConsole {
                 # Non-fatal; continue.
             }
 
-            $packageUrl = "https://www.nuget.org/api/v2/package/Spectre.Console/$spectreVersion"
             Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
         }
 
-        Expand-Archive -LiteralPath $packagePath -DestinationPath $expandedRoot -Force
+        try {
+            Expand-SetupConsoleArchive -ArchivePath $packagePath -DestinationPath $expandedRoot
+        }
+        catch {
+            # A partially downloaded archive can remain in the cache. Remove it and
+            # retry once so a transient download does not permanently break setup.
+            Remove-Item -LiteralPath $expandedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
+            Expand-SetupConsoleArchive -ArchivePath $packagePath -DestinationPath $expandedRoot
+        }
+
+        $hasExtractedAssembly = $null -ne (Get-ChildItem -LiteralPath $expandedRoot -Recurse -Filter 'Spectre.Console.dll' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if (-not $hasExtractedAssembly) {
+            Remove-Item -LiteralPath $expandedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath -UseBasicParsing
+            Expand-SetupConsoleArchive -ArchivePath $packagePath -DestinationPath $expandedRoot
+        }
     }
 
     $candidateFrameworks = if ($PSVersionTable.PSEdition -eq 'Core') {
@@ -64,7 +314,7 @@ function Initialize-SpectreConsole {
     }
 
     if (-not $spectreAssemblyPath) {
-        $spectreAssemblyPath = Get-ChildItem -Path $expandedRoot -Recurse -Filter 'Spectre.Console.dll' -File |
+        $spectreAssemblyPath = Get-ChildItem -LiteralPath $expandedRoot -Recurse -Filter 'Spectre.Console.dll' -File |
             Select-Object -ExpandProperty FullName -First 1
     }
 
@@ -72,6 +322,7 @@ function Initialize-SpectreConsole {
         throw "Could not locate Spectre.Console.dll after extracting package version $spectreVersion."
     }
 
+    Initialize-SetupConsoleFrameworkDependencies -PackageRoot $packageRoot
     Add-Type -Path $spectreAssemblyPath -ErrorAction Stop
     $script:SpectreConsoleInitialized = $true
     $script:SpectreConsoleAssemblyPath = $spectreAssemblyPath
@@ -927,31 +1178,25 @@ function Show-SelectionPromptWithInterruptHandling {
 
     Initialize-SpectreConsole
 
-    $cancellationTokenSource = [System.Threading.CancellationTokenSource]::new()
-    $cancellationState = [pscustomobject]@{
-        Cancelled           = $false
-        TokenSourceDisposed = $false
-    }
-
-    $cancelHandler = [System.ConsoleCancelEventHandler]{
-        param($sender, $eventArgs)
-
-        $eventArgs.Cancel = $true
-        $cancellationState.Cancelled = $true
-
-        if (-not $cancellationState.TokenSourceDisposed -and -not $cancellationTokenSource.IsCancellationRequested) {
-            $cancellationTokenSource.Cancel()
-        }
-    }
-
+    $cancellationSupportType = Initialize-SetupConsoleCancellationSupport
+    $cancellationTokenSource = $null
     $handlerAttached = $false
     try {
-        $handlerAttached = Add-SetupConsoleCancelHandler -Handler $cancelHandler
+        $startMethod = $cancellationSupportType.GetMethod(
+            'Start',
+            [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static
+        )
+        $cancellationTokenSource = $startMethod.Invoke($null, [object[]]@())
+        $handlerAttached = $null -ne $cancellationTokenSource
+
+        if ($null -eq $cancellationTokenSource) {
+            $cancellationTokenSource = [System.Threading.CancellationTokenSource]::new()
+        }
 
         return $Prompt.ShowAsync([Spectre.Console.AnsiConsole]::Console, $cancellationTokenSource.Token).GetAwaiter().GetResult()
     }
     catch {
-        if ($cancellationState.Cancelled -or (Test-IsUserInterruptException -Exception $_.Exception)) {
+        if (($cancellationTokenSource -and $cancellationTokenSource.IsCancellationRequested) -or (Test-IsUserInterruptException -Exception $_.Exception)) {
             throw ([System.OperationCanceledException]::new('Setup cancelled by user.'))
         }
 
@@ -960,15 +1205,19 @@ function Show-SelectionPromptWithInterruptHandling {
     finally {
         if ($handlerAttached) {
             try {
-                Remove-SetupConsoleCancelHandler -Handler $cancelHandler
+                $stopMethod = $cancellationSupportType.GetMethod(
+                    'Stop',
+                    [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Static
+                )
+                [void]$stopMethod.Invoke($null, [object[]]@($cancellationTokenSource))
             }
             catch {
                 # Ignore cleanup failures.
             }
         }
-
-        $cancellationState.TokenSourceDisposed = $true
-        $cancellationTokenSource.Dispose()
+        elseif ($null -ne $cancellationTokenSource) {
+            $cancellationTokenSource.Dispose()
+        }
     }
 }
 
@@ -2101,6 +2350,144 @@ function Set-AlmConfigSolutionCheckEnabledInFile {
     }
 
     return $hasChanges
+}
+
+function Set-AlmConfigBuildValidationBaselineReleaseInFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$BaselineRelease,
+        [Parameter()][switch]$CreateIfMissing,
+        [Parameter()][string]$TemplatePath
+    )
+
+    if (-not (Test-Path -LiteralPath $ConfigPath)) {
+        if (-not $CreateIfMissing) {
+            throw "alm-config.psd1 not found: $ConfigPath"
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($TemplatePath) -and (Test-Path -LiteralPath $TemplatePath)) {
+            Copy-Item -LiteralPath $TemplatePath -Destination $ConfigPath -Force
+        }
+        else {
+            Set-Content -LiteralPath $ConfigPath -Value "@{`n}`n" -NoNewline
+        }
+    }
+
+    $configContent = Get-Content -LiteralPath $ConfigPath -Raw
+    $escapedBaselineRelease = $BaselineRelease.Replace("'", "''")
+    $baselineBlock = "@{`n        baselineRelease = '$escapedBaselineRelease'`n    }"
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($configContent, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors -and $parseErrors.Count -gt 0) {
+        throw "Could not parse existing alm-config.psd1 '$ConfigPath': $($parseErrors[0].Message)"
+    }
+
+    $rootHashtable = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.HashtableAst]
+    }, $false)
+
+    if (-not $rootHashtable) {
+        throw "Could not find the root hashtable in '$ConfigPath'."
+    }
+
+    $buildValidationEntry = $rootHashtable.KeyValuePairs | Where-Object {
+        $keyText = $_.Item1.Extent.Text.Trim()
+        $keyText -in @('buildValidation', "'buildValidation'", '"buildValidation"')
+    } | Select-Object -First 1
+
+    if ($buildValidationEntry) {
+        $buildValidationHashtable = $buildValidationEntry.Item2.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.HashtableAst]
+        }, $false)
+        if (-not $buildValidationHashtable) {
+            throw "The buildValidation setting in '$ConfigPath' must be a hashtable."
+        }
+
+        $baselineEntry = $buildValidationHashtable.KeyValuePairs | Where-Object {
+            $keyText = $_.Item1.Extent.Text.Trim()
+            $keyText -in @('baselineRelease', "'baselineRelease'", '"baselineRelease"')
+        } | Select-Object -First 1
+
+        if ($baselineEntry) {
+            $valueExtent = $baselineEntry.Item2.Extent
+            $updatedContent = $configContent.Substring(0, $valueExtent.StartOffset) + "'$escapedBaselineRelease'" + $configContent.Substring($valueExtent.EndOffset)
+        }
+        else {
+            $insertOffset = $buildValidationHashtable.Extent.EndOffset - 1
+            $lineEnding = if ($configContent -match "`r`n") { "`r`n" } else { "`n" }
+            $insertText = "$lineEnding        baselineRelease = '$escapedBaselineRelease'$lineEnding    "
+            $updatedContent = $configContent.Substring(0, $insertOffset) + $insertText + $configContent.Substring($insertOffset)
+        }
+    }
+    else {
+        $insertOffset = $rootHashtable.Extent.EndOffset - 1
+        $lineEnding = if ($configContent -match "`r`n") { "`r`n" } else { "`n" }
+        $insertText = "$lineEnding    buildValidation = $baselineBlock$lineEnding"
+        $updatedContent = $configContent.Substring(0, $insertOffset) + $insertText + $configContent.Substring($insertOffset)
+    }
+
+    $hasChanges = ($updatedContent -ne $configContent)
+    if ($hasChanges) {
+        Set-Content -LiteralPath $ConfigPath -Value $updatedContent -NoNewline
+    }
+
+    return $hasChanges
+}
+
+function Select-BuildValidationBaselineEnvironment {
+    [CmdletBinding()]
+    param(
+        [Parameter()][array]$DeploymentEnvironments,
+        [Parameter()][AllowEmptyString()][string]$ExcludedEnvironmentName = '',
+        [Parameter()][AllowEmptyString()][string]$ExcludedEnvironmentUrl = ''
+    )
+
+    $uniqueEnvironments = @()
+    foreach ($environment in @($DeploymentEnvironments)) {
+        $shortName = [string](Get-OptionalObjectPropertyValue -InputObject $environment -PropertyName 'ShortName')
+        $environmentUrl = [string](Get-OptionalObjectPropertyValue -InputObject $environment -PropertyName 'Url')
+        if (-not [string]::IsNullOrWhiteSpace($ExcludedEnvironmentName) -and $shortName -ieq $ExcludedEnvironmentName) {
+            continue
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExcludedEnvironmentUrl) -and
+            -not [string]::IsNullOrWhiteSpace($environmentUrl) -and
+            $environmentUrl.TrimEnd('/') -ieq $ExcludedEnvironmentUrl.TrimEnd('/')) {
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($shortName) -or
+            @($uniqueEnvironments | Where-Object { [string]$_.ShortName -ieq $shortName }).Count -gt 0) {
+            continue
+        }
+
+        $uniqueEnvironments += [pscustomobject]@{
+            ShortName = $shortName
+            FriendlyName = [string](Get-OptionalObjectPropertyValue -InputObject $environment -PropertyName 'FriendlyName')
+        }
+    }
+
+    if ($uniqueEnvironments.Count -eq 0) {
+        Write-Host 'No deployment environments are configured, so no baseline environment can be selected. BUILD validation will deploy only the candidate release.' -ForegroundColor Yellow
+        return ''
+    }
+
+    $items = @('No baseline release') + @($uniqueEnvironments | ForEach-Object {
+        $friendlyName = if ([string]::IsNullOrWhiteSpace($_.FriendlyName)) { $_.ShortName } else { $_.FriendlyName }
+        "$friendlyName ($($_.ShortName))"
+    })
+    $selectedIndex = Select-FromMenu -Title 'Select the separate deployment environment whose latest successful deployment should be used as the BUILD validation baseline' -Items $items
+    if ($null -eq $selectedIndex) {
+        throw 'No BUILD validation baseline choice was selected.'
+    }
+    if ($selectedIndex -eq 0) {
+        return ''
+    }
+
+    return "@$($uniqueEnvironments[$selectedIndex - 1].ShortName)"
 }
 
 function Select-ConfiguredDeploymentEnvironments {

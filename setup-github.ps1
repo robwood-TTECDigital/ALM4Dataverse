@@ -109,14 +109,81 @@ foreach ($modName in $requiredModules.Keys) {
     Import-RequiredModuleVersion -Name $modName -RequiredVersion $version -Destination $TempModuleRoot
 }
 
-# Verify GitHub CLI is available
+function Install-PortableGitHubCli {
+    param(
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    $architecture = switch ($env:PROCESSOR_ARCHITECTURE) {
+        'AMD64' { 'amd64' }
+        'ARM64' { 'arm64' }
+        'x86' { '386' }
+        default { throw "Unsupported processor architecture '$env:PROCESSOR_ARCHITECTURE' for GitHub CLI." }
+    }
+
+    $installDir = Join-Path $Destination 'GitHubCLI'
+    $ghBinDir = Join-Path $installDir 'bin'
+    $ghExe = Join-Path $ghBinDir 'gh.exe'
+    if (Test-Path -LiteralPath $ghExe) {
+        Write-Host "GitHub CLI already available at: $ghExe"
+        return $ghBinDir
+    }
+
+    $archivePath = Join-Path $Destination 'GitHubCLI.zip'
+    try {
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        }
+
+        Write-Host "Downloading GitHub CLI..." -ForegroundColor Yellow
+        $release = Invoke-RestMethod `
+            -Uri 'https://api.github.com/repos/cli/cli/releases/latest' `
+            -Headers @{ Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' } `
+            -UseBasicParsing
+        $asset = $release.assets |
+            Where-Object { $_.name -match "^gh_.+_windows_$architecture\.zip$" } |
+            Select-Object -First 1
+        if (-not $asset) {
+            throw "Could not find a GitHub CLI release archive for Windows architecture '$architecture'."
+        }
+
+        if (Test-Path -LiteralPath $installDir) {
+            Remove-Item -LiteralPath $installDir -Recurse -Force
+        }
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archivePath -UseBasicParsing
+        Expand-SetupConsoleArchive -ArchivePath $archivePath -DestinationPath $installDir
+
+        $ghBinDir = Join-Path $installDir 'bin'
+        $ghExe = Join-Path $ghBinDir 'gh.exe'
+        if (-not (Test-Path -LiteralPath $ghExe)) {
+            throw "GitHub CLI was extracted but gh.exe was not found at the expected location: $ghExe"
+        }
+
+        Write-Host "GitHub CLI downloaded to: $ghExe"
+        return $ghBinDir
+    }
+    catch {
+        Write-Host "Failed to download GitHub CLI: $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }
+    finally {
+        if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# Download GitHub CLI to the temporary setup directory when it is not installed.
 $ghCmd = Get-Command gh -ErrorAction SilentlyContinue
 if (-not $ghCmd) {
-    Write-Host ""
-    Write-Host "GitHub CLI (gh) is required but was not found." -ForegroundColor Red
-    Write-Host "Please install it from https://cli.github.com/ and re-run this script." -ForegroundColor Red
-    Write-Host ""
-    throw "GitHub CLI (gh) not found."
+    $ghBinDir = Install-PortableGitHubCli -Destination $TempModuleRoot
+    if (-not ($env:PATH -split ';' | Where-Object { $_ -eq $ghBinDir })) {
+        $env:PATH = "$ghBinDir;$env:PATH"
+    }
+    $ghCmd = Get-Command gh -ErrorAction SilentlyContinue
+}
+if (-not $ghCmd) {
+    throw "GitHub CLI was downloaded but is still not available in PATH."
 }
 
 # Verify Git is available
@@ -550,6 +617,137 @@ function Get-GitHubRepo {
         throw "Failed to get repository '$Owner/$Repo': $($result -join "`n")"
     }
     return (@($result) -join [Environment]::NewLine) | ConvertFrom-Json
+}
+
+function Get-GitHubRepositoryIdentity {
+    <#
+    .SYNOPSIS
+        Returns the repository IDs and OIDC subject format used by GitHub.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [Parameter(Mandatory)][string]$Repo
+    )
+
+    $repository = Invoke-GhApi -Endpoint "repos/$Owner/$Repo"
+    if (-not $repository) {
+        throw "Could not retrieve repository metadata for '$Owner/$Repo'."
+    }
+
+    $repositoryPropertyNames = @($repository.PSObject.Properties.Name)
+    $ownerObject = if ($repositoryPropertyNames -contains 'owner') { $repository.owner } else { $null }
+    $ownerPropertyNames = if ($ownerObject) { @($ownerObject.PSObject.Properties.Name) } else { @() }
+    $ownerId = if ($ownerPropertyNames -contains 'id') { [string]$ownerObject.id } else { $null }
+    $repositoryId = if ($repositoryPropertyNames -contains 'id') { [string]$repository.id } else { $null }
+
+    if ([string]::IsNullOrWhiteSpace($ownerId) -or $ownerId -notmatch '^\d+$') {
+        throw "GitHub did not return a numeric owner ID for repository '$Owner/$Repo'."
+    }
+    if ([string]::IsNullOrWhiteSpace($repositoryId) -or $repositoryId -notmatch '^\d+$') {
+        throw "GitHub did not return a numeric repository ID for '$Owner/$Repo'."
+    }
+
+    # Existing repositories remain on the legacy subject format unless they opt in.
+    # Read GitHub's effective repository setting instead of inferring the format from age.
+    $oidcCustomization = Invoke-GhApi -Endpoint "repos/$Owner/$Repo/actions/oidc/customization/sub" -AllowNotFound
+    $oidcCustomizationPropertyNames = if ($oidcCustomization) { @($oidcCustomization.PSObject.Properties.Name) } else { @() }
+    if (-not $oidcCustomization -or $oidcCustomizationPropertyNames -notcontains 'use_immutable_subject') {
+        throw "GitHub did not report the OIDC subject format for repository '$Owner/$Repo'."
+    }
+
+    return [pscustomobject]@{
+        OwnerId             = [long]$ownerId
+        RepositoryId        = [long]$repositoryId
+        UseImmutableSubject = [bool]$oidcCustomization.use_immutable_subject
+        OidcCustomization   = $oidcCustomization
+    }
+}
+
+function Set-GitHubRepositoryImmutableSubject {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Owner,
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][object]$CurrentCustomization
+    )
+
+    $customizationPropertyNames = @($CurrentCustomization.PSObject.Properties.Name)
+    if ($customizationPropertyNames -notcontains 'use_default') {
+        throw "GitHub did not return the current OIDC customization mode for '$Owner/$Repo'."
+    }
+
+    $body = @{
+        use_default           = [bool]$CurrentCustomization.use_default
+        use_immutable_subject = $true
+    }
+
+    if (-not $body.use_default) {
+        if ($customizationPropertyNames -notcontains 'include_claim_keys') {
+            throw "Cannot preserve the existing custom OIDC claims for '$Owner/$Repo'."
+        }
+
+        $body.include_claim_keys = @($CurrentCustomization.include_claim_keys)
+    }
+
+    Write-Host "Enabling immutable GitHub OIDC subjects for '$Owner/$Repo'..." -ForegroundColor Yellow
+    $updated = Invoke-GhApi `
+        -Endpoint "repos/$Owner/$Repo/actions/oidc/customization/sub" `
+        -Method 'PUT' `
+        -Body $body
+
+    # GitHub may return an empty 201 response; re-read the effective setting in that case.
+    if (-not $updated) {
+        $updated = Invoke-GhApi -Endpoint "repos/$Owner/$Repo/actions/oidc/customization/sub"
+    }
+
+    if (-not $updated -or $updated.PSObject.Properties.Name -notcontains 'use_immutable_subject' -or -not [bool]$updated.use_immutable_subject) {
+        throw "GitHub did not confirm immutable OIDC subjects for '$Owner/$Repo'."
+    }
+
+    Write-Host "Immutable GitHub OIDC subjects enabled for '$Owner/$Repo'." -ForegroundColor Green
+    return $updated
+}
+
+function New-GitHubEnvironmentWifSubject {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepoOwner,
+        [Parameter(Mandatory)][string]$RepoName,
+        [Parameter(Mandatory)][string]$RepoFullName,
+        [Parameter(Mandatory)][long]$RepoOwnerId,
+        [Parameter(Mandatory)][long]$RepoId,
+        [Parameter(Mandatory)][string]$EnvironmentName,
+        [Parameter(Mandatory)][bool]$UseImmutableSubject
+    )
+
+    $repositorySubject = if ($UseImmutableSubject) {
+        "${RepoOwner}@${RepoOwnerId}/${RepoName}@${RepoId}"
+    }
+    else {
+        $RepoFullName
+    }
+
+    return "repo:${repositorySubject}:environment:${EnvironmentName}"
+}
+
+function Test-GitHubEnvironmentConfigurationUsesWif {
+    [CmdletBinding()]
+    param(
+        [Parameter()][object]$EnvironmentConfiguration
+    )
+
+    if ($null -eq $EnvironmentConfiguration) {
+        return $false
+    }
+
+    $configurationPropertyNames = @($EnvironmentConfiguration.PSObject.Properties.Name)
+    if ($configurationPropertyNames -notcontains 'Credentials' -or $null -eq $EnvironmentConfiguration.Credentials) {
+        return $false
+    }
+
+    $credentialPropertyNames = @($EnvironmentConfiguration.Credentials.PSObject.Properties.Name)
+    return ($credentialPropertyNames -contains 'AuthType' -and [string]$EnvironmentConfiguration.Credentials.AuthType -eq 'WIF')
 }
 
 function Ensure-GitHubSharedWorkflowAccessPolicy {
@@ -1129,7 +1327,9 @@ function Get-GitHubOwnedReposForOwner {
         [Parameter(Mandatory)][string]$Owner
     )
 
-    $repos = Invoke-GhApi -Endpoint "users/$Owner/repos?type=owner&sort=updated&per_page=100"
+    # Use the authenticated-user endpoint so private repositories owned by the
+    # current gh account are included in the selection list.
+    $repos = Invoke-GhApi -Endpoint "user/repos?affiliation=owner&sort=updated&per_page=100"
     if (-not $repos) {
         return @()
     }
@@ -1464,7 +1664,8 @@ function Get-GitHubForksOfRepositoryForOwner {
         [Parameter(Mandatory)][string]$UpstreamFullName
     )
 
-    $ownedRepos = Invoke-GhApi -Endpoint "users/$Owner/repos?type=owner&sort=updated&per_page=100"
+    # The authenticated endpoint includes private forks as well as public ones.
+    $ownedRepos = Invoke-GhApi -Endpoint "user/repos?affiliation=owner&sort=updated&per_page=100"
     if (-not $ownedRepos) {
         return @()
     }
@@ -1637,8 +1838,7 @@ function Ensure-GitHubForkForSharedWorkflows {
             'Private'
         )
         $creationModeSelection = Select-FromMenu -Title "How should '$selectedSharedRepositoryFullName' be created?" -Items $creationModeItems -PromptGuidanceLines @(
-            'Choose whether the shared workflow repository should be public (fork style) or private.',
-            'Pick an option that target repositories can access for shared composite actions.'
+            'Choose whether the shared workflow repository should be public (fork style) or private.'
         ) -PromptGuidanceDocRelativePath 'docs/setup/github-setup.md' -PromptGuidanceRef $ALM4DataverseRef
         if ($null -eq $creationModeSelection) {
             throw 'No shared workflow repository type selected.'
@@ -1947,27 +2147,85 @@ function Add-EntraIdFederatedCredential {
 
     Write-Host "Adding federated identity credential '$CredentialName'..." -ForegroundColor Yellow
 
-    # Check if a credential with this name already exists
     $listUri = "https://graph.microsoft.com/beta/applications/$ApplicationObjectId/federatedIdentityCredentials"
+    $issuer = 'https://token.actions.githubusercontent.com'
+    $audience = 'api://AzureADTokenExchange'
+    $body = @{
+        name        = $CredentialName
+        issuer      = $issuer
+        subject     = $Subject
+        audiences   = @($audience)
+        description = $Description
+    }
+
+    $existing = $null
     try {
         $existing = Invoke-RestMethod -Uri $listUri -Headers $headers -Method Get
-        $match = $existing.value | Where-Object { $_.name -eq $CredentialName } | Select-Object -First 1
-        if ($match) {
-            Write-Host "Federated credential '$CredentialName' already exists."
-            return $match
-        }
     }
     catch {
         Write-Warning "Failed to check for existing federated credentials: $($_.Exception.Message)"
     }
 
-    # Create the federated credential
-    $body = @{
-        name      = $CredentialName
-        issuer    = 'https://token.actions.githubusercontent.com'
-        subject   = $Subject
-        audiences = @('api://AzureADTokenExchange')
-        description = $Description
+    $existingCredentials = if ($existing -and $existing.PSObject.Properties.Name -contains 'value') {
+        @($existing.value)
+    }
+    else {
+        @()
+    }
+
+    $match = @($existingCredentials | Where-Object { $_.name -eq $CredentialName }) | Select-Object -First 1
+    if ($match) {
+        $existingAudiences = @($match.audiences | ForEach-Object { [string]$_ })
+        $isCurrent = (
+            [string]$match.issuer -eq $issuer -and
+            [string]$match.subject -eq $Subject -and
+            $existingAudiences.Count -eq 1 -and
+            $existingAudiences[0] -eq $audience
+        )
+
+        if ($isCurrent) {
+            Write-Host "Federated credential '$CredentialName' already exists."
+            return $match
+        }
+
+        if ([string]::IsNullOrWhiteSpace([string]$match.id)) {
+            throw "Federated credential '$CredentialName' exists but its ID could not be determined for update."
+        }
+
+        Write-Host "Federated credential '$CredentialName' exists with outdated WIF settings; updating it..." -ForegroundColor Yellow
+        $credentialUri = "$listUri/$([Uri]::EscapeDataString([string]$match.id))"
+        $updateBody = @{
+            issuer      = $issuer
+            subject     = $Subject
+            audiences   = @($audience)
+            description = $Description
+        }
+        try {
+            $updated = Invoke-RestMethod `
+                -Uri $credentialUri `
+                -Headers $headers `
+                -Method Patch `
+                -Body ($updateBody | ConvertTo-Json -Depth 10)
+
+            Write-Host "Updated federated identity credential successfully."
+            if ($updated) {
+                return $updated
+            }
+
+            return Invoke-RestMethod -Uri $credentialUri -Headers $headers -Method Get
+        }
+        catch {
+            Write-Error "Failed to update federated identity credential: $($_.Exception.Message)"
+            throw
+        }
+    }
+
+    $subjectMatch = @($existingCredentials | Where-Object {
+        [string]$_.issuer -eq $issuer -and [string]$_.subject -eq $Subject
+    }) | Select-Object -First 1
+    if ($subjectMatch) {
+        Write-Host "Federated credential for this issuer and subject already exists as '$($subjectMatch.name)'."
+        return $subjectMatch
     }
 
     try {
@@ -2730,6 +2988,9 @@ function Apply-GitHubEnvironmentConfiguration {
         [Parameter(Mandatory)][string]$RepoOwner,
         [Parameter(Mandatory)][string]$RepoName,
         [Parameter(Mandatory)][string]$RepoFullName,
+        [Parameter(Mandatory)][long]$RepoOwnerId,
+        [Parameter(Mandatory)][long]$RepoId,
+        [Parameter(Mandatory)][bool]$UseImmutableWifSubject,
         [Parameter()][bool]$UseGitHubEnvironments = $true,
         [Parameter()][bool]$EnableApprovals = $false,
         [Parameter()][array]$RequiredReviewerIds = @()
@@ -2740,10 +3001,18 @@ function Apply-GitHubEnvironmentConfiguration {
 
     if ($creds.AuthType -eq 'WIF' -and $creds.ApplicationObjectId) {
         $credName = ConvertTo-UrlSafeName -Name "gha-$RepoName-env-$($EnvironmentConfiguration.ShortName)"
+        $wifSubject = New-GitHubEnvironmentWifSubject `
+            -RepoOwner $RepoOwner `
+            -RepoName $RepoName `
+            -RepoFullName $RepoFullName `
+            -RepoOwnerId $RepoOwnerId `
+            -RepoId $RepoId `
+            -EnvironmentName $EnvironmentConfiguration.ShortName `
+            -UseImmutableSubject $UseImmutableWifSubject
         [void](Add-EntraIdFederatedCredential `
             -ApplicationObjectId $creds.ApplicationObjectId `
             -TenantId $TenantId `
-            -Subject "repo:${RepoFullName}:environment:$($EnvironmentConfiguration.ShortName)" `
+            -Subject $wifSubject `
             -CredentialName $credName)
     }
 
@@ -2927,6 +3196,7 @@ function Update-AlmConfigInRepoClone {
     param(
         [Parameter()][AllowNull()][array]$Solutions,
         [Parameter(Mandatory)][bool]$BuildValidationEnabled,
+        [Parameter()][AllowEmptyString()][string]$BuildValidationBaselineRelease = '',
         [Parameter(Mandatory)][string]$RepoRoot
     )
 
@@ -2943,7 +3213,8 @@ function Update-AlmConfigInRepoClone {
     }
 
     [void](Set-AlmConfigSolutionCheckEnabledInFile -ConfigPath $configPath -Enabled $BuildValidationEnabled -CreateIfMissing -TemplatePath $templatePath)
-    Write-Host "Updated alm-config.psd1 with $($effectiveSolutions.Count) solution(s); solutionCheck.enabled=$BuildValidationEnabled."
+    [void](Set-AlmConfigBuildValidationBaselineReleaseInFile -ConfigPath $configPath -BaselineRelease $BuildValidationBaselineRelease -CreateIfMissing -TemplatePath $templatePath)
+    Write-Host "Updated alm-config.psd1 with $($effectiveSolutions.Count) solution(s); solutionCheck.enabled=$BuildValidationEnabled; buildValidation.baselineRelease='$BuildValidationBaselineRelease'."
 }
 
 function Update-BuildWorkflowInRepoClone {
@@ -2952,7 +3223,7 @@ function Update-BuildWorkflowInRepoClone {
         [Parameter(Mandatory)][string]$RepoRoot,
         [Parameter(Mandatory)][string]$SharedWorkflowRepository,
         [Parameter(Mandatory)][string]$SharedWorkflowReference,
-        [Parameter(Mandatory)][string]$BuildEnvironmentName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$BuildEnvironmentName,
         [Parameter(Mandatory)][bool]$BuildValidationEnabled
     )
 
@@ -2977,6 +3248,7 @@ function Update-BuildWorkflowInRepoClone {
             name: '$escapedBuildEnvironmentName'
             deployment: false
 "@
+        $environmentBlock += "`r`n"
     }
 
     $newContent = @"
@@ -3336,6 +3608,7 @@ function Publish-GitHubBranchSetupChanges {
         [Parameter()][array]$DeployWorkflowBranchDefinitions,
         [Parameter()][bool]$BuildValidationEnabled = $false,
         [Parameter()][AllowEmptyString()][string]$BuildValidationEnvironmentName = '',
+        [Parameter()][AllowEmptyString()][string]$BuildValidationBaselineRelease = '',
         [Parameter()][switch]$SkipDeployWorkflow
     )
 
@@ -3426,7 +3699,11 @@ function Publish-GitHubBranchSetupChanges {
             -SharedWorkflowRef $SharedWorkflowReference `
             -SkipDeployWorkflow:$SkipDeployWorkflow
 
-        Update-AlmConfigInRepoClone -Solutions $Solutions -BuildValidationEnabled $BuildValidationEnabled -RepoRoot $RepoRoot
+        Update-AlmConfigInRepoClone `
+            -Solutions $Solutions `
+            -BuildValidationEnabled $BuildValidationEnabled `
+            -BuildValidationBaselineRelease $BuildValidationBaselineRelease `
+            -RepoRoot $RepoRoot
 
         $buildEnvironmentName = if ($BuildValidationEnabled) { [string]$BuildValidationEnvironmentName } else { '' }
         Update-BuildWorkflowInRepoClone `
@@ -3574,6 +3851,7 @@ function Invoke-GitHubBranchAwareSetup {
             BranchEnvironmentMappingCompleted = $false
             BuildValidationEnabled = [bool](Get-OptionalObjectPropertyValue -InputObject $ExistingSetupState -PropertyName 'BuildValidationEnabled')
             BuildValidationEnvironmentName = [string](Get-OptionalObjectPropertyValue -InputObject $ExistingSetupState -PropertyName 'BuildValidationEnvironmentName')
+            BuildValidationBaselineRelease = ''
             BuildValidationEnvironmentConfiguration = (Get-OptionalObjectPropertyValue -InputObject $ExistingSetupState -PropertyName 'ExistingBuildValidationEnvironment')
         }
 
@@ -4277,20 +4555,21 @@ function Invoke-GitHubBranchAwareSetup {
                     Write-Section `
                         -Message 'Configure solution validation during BUILD'
                     Write-SetupGuidance -Lines @(
-                        'When enabled, BUILD uses one global Dataverse environment for pre-build connect/auth and solution validation.',
-                        'This is configured once and then applied across all configured branches.'
+                        'When enabled, BUILD deploys its generated artifacts to one shared Dataverse validation environment across all configured branches.',
+                        'You can also select a separate deployment environment as the optional baseline source; its last successful BUILD is deployed before the candidate.'
                     ) -DocRelativePath 'docs/usage/building-releases.md' -Ref $ALM4DataverseRef -Header 'Build validation guidance'
 
                     $enableBuildValidation = if ([bool]$wizardState.BuildValidationEnabled) {
-                        Read-YesNo -Prompt 'Enable solution validation during BUILD?'
+                        Read-YesNo -Prompt 'Enable Dataverse deployment validation during BUILD?'
                     }
                     else {
-                        Read-YesNo -Prompt 'Enable solution validation during BUILD?' -DefaultNo
+                        Read-YesNo -Prompt 'Enable Dataverse deployment validation during BUILD?' -DefaultNo
                     }
 
                     if (-not $enableBuildValidation) {
                         $wizardState.BuildValidationEnabled = $false
                         $wizardState.BuildValidationEnvironmentName = ''
+                        $wizardState.BuildValidationBaselineRelease = ''
                         $wizardState.BuildValidationEnvironmentConfiguration = $null
                         return
                     }
@@ -4346,6 +4625,14 @@ function Invoke-GitHubBranchAwareSetup {
                         $wizardState.BuildValidationEnvironmentName = [string]$wizardState.BuildValidationEnvironmentConfiguration.ShortName
                     }
 
+                    $baselineEnvironments = @()
+                    foreach ($branchState in @($wizardState.BranchStates)) {
+                        $baselineEnvironments += @($branchState.DeploymentEnvironments)
+                    }
+                    $wizardState.BuildValidationBaselineRelease = Select-BuildValidationBaselineEnvironment `
+                        -DeploymentEnvironments $baselineEnvironments `
+                        -ExcludedEnvironmentName ([string]$wizardState.BuildValidationEnvironmentName) `
+                        -ExcludedEnvironmentUrl ([string](Get-OptionalObjectPropertyValue -InputObject $wizardState.BuildValidationEnvironmentConfiguration -PropertyName 'Url'))
                     $wizardState.BuildValidationEnabled = $true
                 }
             },
@@ -4427,6 +4714,7 @@ function Invoke-GitHubBranchAwareSetup {
                         'Configured branches'      = [string]$wizardState.BranchStates.Count
                         'BUILD validation'         = $(if ($wizardState.BuildValidationEnabled) { 'Enabled' } else { 'Disabled' })
                         'BUILD validation environment' = $(if (-not [string]::IsNullOrWhiteSpace([string]$wizardState.BuildValidationEnvironmentName)) { [string]$wizardState.BuildValidationEnvironmentName } elseif ($wizardState.BuildValidationEnvironmentConfiguration) { $wizardState.BuildValidationEnvironmentConfiguration.ShortName } else { '<none>' })
+                        'BUILD validation baseline' = $(if ([string]::IsNullOrWhiteSpace([string]$wizardState.BuildValidationBaselineRelease)) { '<none>' } else { [string]$wizardState.BuildValidationBaselineRelease })
                         'Solution source branch'   = $(if ([string]::IsNullOrWhiteSpace($wizardState.SolutionSourceBranch)) { '<none>' } else { $wizardState.SolutionSourceBranch })
                         'Solutions selected'       = [string]$(if ($wizardState.SolutionResult) { @($wizardState.SolutionResult.Solutions).Count } else { 0 })
                     })
@@ -4572,6 +4860,7 @@ function Invoke-GitHubBranchAwareSetup {
                         -DeployWorkflowBranchDefinitions $deployDefinitionsForBranchPublish `
                         -BuildValidationEnabled ([bool]$wizardState.BuildValidationEnabled) `
                         -BuildValidationEnvironmentName $buildValidationEnvironmentNameForPublish `
+                        -BuildValidationBaselineRelease ([string]$wizardState.BuildValidationBaselineRelease) `
                         -SkipDeployWorkflow:$isRemovedBranch
             }
 
@@ -4591,6 +4880,7 @@ function Invoke-GitHubBranchAwareSetup {
             SolutionSourceBranch = $wizardState.SolutionSourceBranch
             BuildValidationEnabled = [bool]$wizardState.BuildValidationEnabled
             BuildValidationEnvironmentName = [string]$wizardState.BuildValidationEnvironmentName
+            BuildValidationBaselineRelease = [string]$wizardState.BuildValidationBaselineRelease
             BuildValidationEnvironmentConfiguration = $wizardState.BuildValidationEnvironmentConfiguration
             PublishResults       = @($publishResults)
         }
@@ -4801,6 +5091,15 @@ $repoName     = $selectedRepo.name
 $repoFullName = $selectedRepo.nameWithOwner
 
 Write-Host "Selected: $repoFullName" -ForegroundColor Cyan
+
+$repoIdentity = Invoke-WithSpectreStatus -Status "Loading GitHub owner and repository IDs for '$repoFullName'..." -ScriptBlock {
+    Get-GitHubRepositoryIdentity -Owner $repoOwner -Repo $repoName
+}
+$repoOwnerId = [long]$repoIdentity.OwnerId
+$repoId = [long]$repoIdentity.RepositoryId
+$useImmutableWifSubject = [bool]$repoIdentity.UseImmutableSubject
+$wifSubjectFormat = if ($useImmutableWifSubject) { 'immutable owner/repository ID' } else { 'legacy owner/repository name' }
+Write-Host "GitHub OIDC identity: owner ID $repoOwnerId, repository ID $repoId ($wifSubjectFormat subject format)" -ForegroundColor DarkGray
 
 # Determine default branch
 $defaultBranch = 'main'
@@ -5052,6 +5351,59 @@ foreach ($branchState in @($branchStates)) {
     $allConfiguredEnvironments += @($branchState.DeploymentEnvironments)
 }
 
+$hasWifCredential = $false
+foreach ($branchState in @($branchStates)) {
+    if (Test-GitHubEnvironmentConfigurationUsesWif -EnvironmentConfiguration $branchState.DevEnvironmentConfiguration) {
+        $hasWifCredential = $true
+    }
+
+    foreach ($deploymentEnvironment in @($branchState.DeploymentEnvironments)) {
+        if (Test-GitHubEnvironmentConfigurationUsesWif -EnvironmentConfiguration $deploymentEnvironment) {
+            $hasWifCredential = $true
+        }
+    }
+}
+if (Test-GitHubEnvironmentConfigurationUsesWif -EnvironmentConfiguration $buildValidationEnvironmentConfiguration) {
+    $hasWifCredential = $true
+}
+
+if (-not $useImmutableWifSubject -and $hasWifCredential) {
+    $immutableSubjectChangelogUrl = 'https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/#opt-in-for-existing-repositories'
+    $enableImmutableSubject = Read-YesNo `
+        -Prompt "Enable immutable GitHub OIDC subjects for '$repoFullName'?" `
+        -PromptGuidanceLines @(
+            'Workload Identity Federation was selected for at least one ALM4Dataverse credential.',
+            'Recommended: immutable owner/repository IDs reduce the risk of trust being reused after a name is recycled.',
+            'Risk: other workflows or applications in this repository that trust legacy subjects may stop authenticating until their cloud credentials are updated.',
+            "Changelog: $immutableSubjectChangelogUrl"
+        ) `
+        -PromptGuidanceDocRelativePath 'docs/config/github-secrets.md' `
+        -PromptGuidanceRef $ALM4DataverseRef `
+        -DefaultNo
+
+    if ($enableImmutableSubject) {
+        $updatedOidcCustomization = Invoke-WithErrorHandling `
+            -OperationName "Enabling immutable GitHub OIDC subjects for '$repoFullName'" `
+            -StatusMessage "Enabling immutable GitHub OIDC subjects for '$repoFullName'..." `
+            -ScriptBlock {
+                Set-GitHubRepositoryImmutableSubject `
+                    -Owner $repoOwner `
+                    -Repo $repoName `
+                    -CurrentCustomization $repoIdentity.OidcCustomization
+            }
+
+        if (-not $updatedOidcCustomization) {
+            throw "GitHub did not return updated OIDC settings for '$repoFullName'."
+        }
+
+        $repoIdentity.OidcCustomization = $updatedOidcCustomization
+        $useImmutableWifSubject = [bool]$updatedOidcCustomization.use_immutable_subject
+    }
+    else {
+        Write-Host "Keeping legacy GitHub OIDC subjects. ALM4Dataverse federated credentials will use the existing repository format." -ForegroundColor Yellow
+    }
+}
+
 try { Remove-Item -LiteralPath $cloneRoot -Recurse -Force -ErrorAction SilentlyContinue } catch { }
 
 # ─────────────────────────────────────────────────────────────
@@ -5082,6 +5434,9 @@ else {
                 -RepoOwner $repoOwner `
                 -RepoName $repoName `
                 -RepoFullName $repoFullName `
+                -RepoOwnerId $repoOwnerId `
+                -RepoId $repoId `
+                -UseImmutableWifSubject $useImmutableWifSubject `
                 -UseGitHubEnvironments $useGitHubEnvironments `
                 -EnableApprovals:$false
         } | Out-Null
@@ -5106,6 +5461,9 @@ else {
             -RepoOwner $repoOwner `
             -RepoName $repoName `
             -RepoFullName $repoFullName `
+            -RepoOwnerId $repoOwnerId `
+            -RepoId $repoId `
+            -UseImmutableWifSubject $useImmutableWifSubject `
             -UseGitHubEnvironments $useGitHubEnvironments `
             -EnableApprovals:$false
     } -StatusMessage 'Applying global BUILD validation environment configuration...' -CaptureOutputInPanel | Out-Null
@@ -5141,6 +5499,9 @@ else {
                     -RepoOwner $repoOwner `
                     -RepoName $repoName `
                     -RepoFullName $repoFullName `
+                    -RepoOwnerId $repoOwnerId `
+                    -RepoId $repoId `
+                    -UseImmutableWifSubject $useImmutableWifSubject `
                     -UseGitHubEnvironments $useGitHubEnvironments `
                     -EnableApprovals:$enableEnvironmentApprovals `
                     -RequiredReviewerIds $environmentApprovalReviewerIds

@@ -21,16 +21,22 @@ actions directly, keeping job-level configuration in the consuming repository.
 
 | Your workflow | Composite action used | Purpose |
 |---|---|---|
-| `BUILD.yml` | `.github/actions/build` | Pack solutions, upload artifacts, tag commit |
+| `BUILD.yml` | `.github/actions/build` | Pack solutions, upload artifacts, tag commit, create a Release |
 | `EXPORT.yml` | `.github/actions/export` | Export from dev Dataverse, commit to repo |
 | `IMPORT.yml` | `.github/actions/import` | Build from source, import into dev Dataverse |
-| `DEPLOY-main.yml` | `.github/actions/deploy` | Deploy artifacts to each environment |
+| `DEPLOY-main.yml` | `.github/actions/deploy` | Deploy Release assets or BUILD artifacts to each environment |
+| `CLEANUP-RELEASES.yml` | `cleanup-releases.yml` | Remove deleted-branch Releases and cap Releases per branch |
 
-During automated setup (`setup-github.ps1`), you are also prompted whether to enable solution validation in `BUILD` globally. If enabled, setup configures one shared GitHub environment for BUILD validation and wires the build action to run Dataverse connect/authentication against that environment before build validation.
+During automated setup (`setup-github.ps1`), you are also prompted whether to enable BUILD validation globally. If enabled, setup configures one shared GitHub environment for BUILD and asks which separate deployment environment should supply the optional baseline release (or lets you choose no baseline). Each BUILD authenticates to the validation environment, creates deployment artifacts, and deploys its baseline first when available, then the candidate; configured PAC Solution Checker rules also run against the packed solutions. If the selected source has no successful deployment yet, BUILD warns and deploys only the candidate until a successful `DEPLOY` creates its pointer. Builds from all branches update the same validation environment, so select a non-production environment that is safe to update repeatedly. See [Building Releases](../usage/building-releases.md) for the validation sequence and PR check configuration.
+
+When configuring manually, set the BUILD workflow's `environment-name` input to a GitHub environment containing the Dataverse URL, credentials, service-account UPN, and any connection-reference/environment-variable settings required by deployment. BUILD deploys its generated artifacts to that environment. Set `buildValidation.baselineRelease` in `alm-config.psd1` to `@<environment-name>`, a fixed successful BUILD run ID, or a GitHub Release tag; a run ID is resolved to the Release and its `artifacts.zip` asset, not the expiring Actions artifact. Leave the setting empty for candidate-only validation. See [BUILD validation](../usage/building-releases.md#build-validation).
 
 ---
 
 ## Prerequisites
+
+When running `setup-github.ps1`, GitHub CLI (`gh`) is downloaded automatically to a temporary setup
+directory if it is not already installed. The downloaded CLI is available for that setup session only.
 
 ### 1. GitHub repository
 
@@ -77,10 +83,21 @@ OIDC tokens with no secrets to manage or rotate.
 
 | Workflow scenario | Subject identifier |
 |---|---|
-| Default ALM4Dataverse workflows (Approach 1, 2, and 3) | `repo:{owner}/{repo}:environment:{environment-name}` |
+| Default ALM4Dataverse workflows (Approach 1, 2, and 3) | `repo:{owner}@{owner-id}/{repo}@{repo-id}:environment:{environment-name}` |
 
-> **Examples** for repo `MyOrg/MyApp`:
-> - Environment-based: `repo:MyOrg/MyApp:environment:TEST-main`
+> **Examples** for repo `MyOrg/MyApp` with owner ID `123456` and repository ID `456789`:
+> - Environment-based: `repo:MyOrg@123456/MyApp@456789:environment:TEST-main`
+
+The numeric IDs are the GitHub `repository_owner_id` and `repository_id` values.
+The automated setup script retrieves them from GitHub and checks the repository's
+`use_immutable_subject` setting so the configured credential matches the subject
+format that GitHub will issue. Existing repositories retain the legacy format unless
+immutable subjects have been explicitly enabled.
+
+When WIF is selected for an existing legacy repository, automated setup offers to
+enable immutable subjects. Review the [GitHub changelog](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/#opt-in-for-existing-repositories)
+first: other workflows or applications in the same repository that trust legacy
+subjects may need their cloud credentials updated.
 
 ALM4Dataverse caller jobs run within a named GitHub environment across all
 credential approaches:
@@ -133,7 +150,8 @@ your-repo/
 │       ├── BUILD.yml
 │       ├── EXPORT.yml
 │       ├── IMPORT.yml
-│       └── DEPLOY-main.yml   ← all environments; auto-chain with environment approvals by default
+│       ├── DEPLOY-main.yml   ← all environments; auto-chain with environment approvals by default
+│       └── CLEANUP-RELEASES.yml
 ├── alm-config.psd1
 └── data/
 ```
@@ -195,6 +213,16 @@ Behavior remains simple:
 
 - **`manual-gate-tag`**: every stage is triggered manually from **Actions** > **DEPLOY-main** > **Run workflow**; `target-environment` remains mandatory, while `build-run-name` can be supplied explicitly or left blank to use the latest successful BUILD from the selected branch.
 - **`environment-approval`**: when BUILD succeeds, it sends a `repository_dispatch` event and stage 1 starts automatically for matching branch workflows; later stages auto-chain only after the previous stage succeeds and any environment approval rules pass. For a manual replay, `target-environment` can be left blank to start from the first configured stage, or set to a specific environment name to jump directly to that stage.
+
+Each successful BUILD creates a GitHub Release with `artifacts.zip` and an
+optional `solution-check-report.zip`. Manual deployment continues to use the
+legacy `build-run-name` input; it accepts a Release tag, BUILD name, or numeric
+BUILD run ID. The reusable deploy action verifies that the caller, BUILD, and
+Release branches agree before deployment.
+
+`CLEANUP-RELEASES.yml` removes managed Releases from deleted branches and keeps
+at most 10 Releases per branch by default. Before deletion it preserves build
+metadata in an annotated `alm4dataverse/metadata/<release-tag>` tag.
 
   The dispatch event type is branch-scoped using:
   `alm4dataverse-build-deploy-{branch-token}`
@@ -524,8 +552,9 @@ The gate tags serve as a **permanent, auditable trail** of which build was deplo
 to which environment and in what order.
 
 The `deployed/{environment}` tag is a **movable pointer** that is updated on every
-successful deployment, making it easy to see the build currently live in each
-environment.
+successful deployment. It is an annotated tag that resolves to the deployed
+source commit and records the exact BUILD run and Release tag for baseline
+validation; older lightweight pointers are still resolved by source commit.
 
 ### Key properties
 
@@ -658,7 +687,7 @@ Once configured:
 2. Copy the exact BUILD name shown in the run title (for example `repo-main-2025-05-27T14:23:11Z-4`). The **Set build number** step shows the same exact value.
 3. Enter that BUILD name into **DEPLOY-main** when you want to deploy a specific build; otherwise, leave `build-run-name` blank to use the latest successful BUILD from the selected branch.
 
-When ALM4Dataverse creates git tags from that BUILD name, it automatically sanitizes characters that git refs do not like. For example, `repo-main-2025-05-27T14:23:11Z-4` becomes the source tag `vrepo-main-2025-05-27T14-23-11Z-4`.
+When ALM4Dataverse creates git tags from that BUILD name, it automatically sanitizes characters that git refs do not like. For example, `repo-main-2025-05-27T14:23:11Z-4` becomes the source tag `repo-main-2025-05-27T14-23-11Z-4`.
 
 For backward compatibility, numeric run IDs from the run URL are still accepted too.
 
@@ -668,7 +697,7 @@ Deployment tags are stored in the repository and are visible in the **Tags** sec
 of the repository (under **Code** > **Tags**).
 
 - `{build-run-name}/deployed/{environment}` is the permanent audit/gate tag.
-- `deployed/{environment}` is the movable pointer showing what is currently deployed.
+- `deployed/{environment}` is the movable pointer showing what is currently deployed and recording its BUILD run metadata.
 
 Example:
 

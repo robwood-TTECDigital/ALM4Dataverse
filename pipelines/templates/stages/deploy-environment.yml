@@ -142,13 +142,26 @@ stages:
 
                     $rawBuildRunName = '$(resources.pipeline.build.runName)'
                     $sanitizedBuildRunName = ConvertTo-TagSegment -Value $rawBuildRunName
-                    $versionTag = "v$sanitizedBuildRunName"
+                    $versionTag = $sanitizedBuildRunName
+                    $legacyVersionTag = "v$sanitizedBuildRunName"
                     $environmentTag = 'deployed/${{ parameters.environmentName }}'
+                    $buildRunId = '$(resources.pipeline.build.runID)'
+                    if ($buildRunId -notmatch '^\d+$') {
+                      throw "Could not resolve the Azure DevOps BUILD run ID '$buildRunId'."
+                    }
 
-                    Write-Host "Fetching build version tag '$versionTag' from origin"
-                    git fetch --force origin "refs/tags/${versionTag}:refs/tags/${versionTag}"
-                    if ($LASTEXITCODE -ne 0) {
-                      throw "Failed to fetch build version tag '$versionTag' from origin"
+                    $versionTagCandidates = @($versionTag, $legacyVersionTag)
+                    $versionTag = $null
+                    foreach ($candidateTag in $versionTagCandidates) {
+                      Write-Host "Fetching build version tag '$candidateTag' from origin"
+                      git fetch --force origin "refs/tags/${candidateTag}:refs/tags/${candidateTag}"
+                      if ($LASTEXITCODE -eq 0) {
+                        $versionTag = $candidateTag
+                        break
+                      }
+                    }
+                    if ([string]::IsNullOrWhiteSpace($versionTag)) {
+                      throw "Failed to fetch build version tags '$($versionTagCandidates -join ', ')' from origin"
                     }
 
                     $targetCommit = (git rev-list -n 1 "$versionTag").Trim()
@@ -156,8 +169,14 @@ stages:
                       throw "Could not resolve a commit SHA from build version tag '$versionTag'"
                     }
 
-                    Write-Host "Updating environment pointer tag '$environmentTag' to commit $targetCommit"
-                    git tag -f "$environmentTag" "$targetCommit"
+                    Write-Host "Updating environment pointer tag '$environmentTag' to BUILD run $buildRunId ($targetCommit)"
+                    $pointerMessage = @(
+                      'ALM4Dataverse environment deployment pointer'
+                      "Build: $rawBuildRunName"
+                      "BUILD run: $buildRunId"
+                      "Source commit: $targetCommit"
+                    ) -join "`n"
+                    git tag -f -a "$environmentTag" -m "$pointerMessage" "$targetCommit"
                     if ($LASTEXITCODE -ne 0) {
                       throw "Failed to create or move environment tag '$environmentTag'"
                     }
