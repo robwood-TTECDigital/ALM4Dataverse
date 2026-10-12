@@ -51,7 +51,7 @@ $results | ForEach-Object {
     $componentType = $_.componenttype
     
     # Load component name to check prefix
-    $names = getComponentNames -componentId $componentId -componentType $componentType -solutionId $solutionId
+    $names = getComponentNames -componentId $componentId -componentType $componentType -solutionId $solutionId -ValidationContext $context
     
     if ($names) {
         $schemaName = $names.ComponentSchemaName

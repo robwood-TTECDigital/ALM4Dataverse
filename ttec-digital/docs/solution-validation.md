@@ -9,11 +9,13 @@ The ALM framework includes a comprehensive solution validation system that runs 
 Solution validation executes automatically during the **export pipeline** after solutions are exported from the source environment. Each solution configured in `alm-config.psd1` is validated before the export process completes.
 
 The validation process:
-1. Compresses each solution folder into a temporary zip file
-2. Connects to the source Dataverse environment
-3. Executes all enabled validation rules
-4. Reports any violations as pipeline errors
-5. Uploads validation artifacts for review
+1. Uses the existing connection to the source Dataverse environment
+2. Executes all enabled validation rules against the environment
+3. Reports any violations as pipeline errors or warnings
+
+Rules run in parallel by default, with up to four rules at once configured by `validation.maxParallel`; set `validation.parallel = $false` for sequential rules. Validation still runs for unchanged solutions and respects existing error, warning and disabled settings, including rule and component overrides.
+
+Validation can overlap solution exports, subject to the shared `export.maxConcurrentOperations` limit (default `4`). Status messages identify the solution and rule, and findings are reported in rule order. Rule execution errors appear directly in the standard log with a solution/rule prefix. Detailed logs and findings are retained in the `export-logs` artifact directory, with a final per-solution summary. See [Export Processing](../../docs/config/alm-config.md#export-processing) for concurrency settings and [Export Logs](../../docs/usage/exporting-changes.md#export-logs) for log formats and artifacts.
 
 ## Available Validation Rules
 

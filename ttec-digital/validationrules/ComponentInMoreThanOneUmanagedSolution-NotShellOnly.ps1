@@ -63,7 +63,7 @@ WHERE sc.objectid = @componentId
     # Bulk load component names for this component type
     $componentSchemaName = $null
     if ($details -and $details.Length -gt 0) {
-        $names = getComponentNames -componentId $componentId -componentType $componentType -solutionId $solutionId
+        $names = getComponentNames -componentId $componentId -componentType $componentType -solutionId $solutionId -ValidationContext $context
         
         if ($names) {
             $componentSchemaName = $names.ComponentSchemaName

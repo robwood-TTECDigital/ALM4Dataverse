@@ -41,6 +41,8 @@ The supplied template additionally includes the `data` asset and example data ho
 | Setting | Type | Default or template value |
 | --- | --- | --- |
 | `solutions` | Array of hashtables | Empty in the template; list solutions in dependency order. |
+| `export` | Hashtable | Up to two concurrent package exports; a shared limit of four operations with validation. |
+| `validation` | Hashtable | Up to four concurrent custom EXPORT rules. |
 | `assets` | Array of paths | `@('data')` in the template. |
 | `hooks` | Hashtable of script-path arrays | Empty except the template's `postExport` and `postDeploy` data hooks. |
 | `scriptDependencies` | Hashtable of module names and versions | `Rnwood.Dataverse.Data.PowerShell = '3.0.3'`. |
@@ -84,6 +86,48 @@ application user used to authenticate.
 > on Linux, where environment variables are case-sensitive. See the
 > [Azure DevOps variable reference](azdo-environment-variable-group.md) or
 > [GitHub variable reference](github-secrets.md).
+
+### Export Processing
+
+```powershell
+export = @{
+    parallel = $true
+    maxParallel = 2
+    maxConcurrentOperations = 4
+}
+validation = @{
+    parallel = $true
+    maxParallel = 4
+}
+```
+
+| Setting | Type | Default | Behavior |
+| --- | --- | --- | --- |
+| `export.parallel` | Boolean | `$true` | Export managed/unmanaged packages concurrently; `$false` retains sequential export. |
+| `export.maxParallel` | Integer, `1` to `8` | `2` | Maximum simultaneous package exports, including both packages of the same solution. |
+| `export.maxConcurrentOperations` | Integer, `1` to `8` | `4` | Shared limit for package exports, running custom rules, and version updates; also applies to validation run by post-export hooks. |
+| `validation.parallel` | Boolean | `$true` | Run custom EXPORT rules concurrently; `$false` retains sequential rules, independently of export mode. |
+| `validation.maxParallel` | Integer, `1` to `8` | `4` | Maximum simultaneous custom validation rules per solution. |
+
+Missing, null, or empty optional settings use the defaults; an explicit `$false`
+is preserved. Invalid types or out-of-range limits fail with a configuration error.
+Findings retain rule order and existing solution, rule and component overrides.
+
+Exports and validation can overlap without exceeding the shared limit. Each
+running validation rule counts as one operation, regardless of how many Dataverse
+requests it makes. Custom hooks are not limited by these settings. Unpacking,
+change detection and version updates run in configured solution order.
+
+Early validation requires the standard fork post-export hook to be first and no
+legacy `PostExportScript`. Otherwise validation runs in the hooks after export.
+Allowed dependencies still include only external dependencies and preceding
+solutions. Other hooks, data exports, Power Pages and Synapse keep their order.
+The `solutionCheck` PAC checker remains a BUILD concern.
+
+See [Exporting changes](../usage/exporting-changes.md#export-logs) for tagged live
+events, grouped details, per-solution summaries and retained `export-logs` artifacts.
+For local measurements, `pipelines/scripts/export.ps1 -PassThru` returns elapsed
+time and export/validation timings; authentication and dependency installation are excluded.
 
 ### Assets
 

@@ -1,7 +1,5 @@
 param($context)
 
-write-host "Getting current solution dependencies"
-
 # Get the solution ID for the solution being validated
 $solutionIdSql = "SELECT solutionid FROM solution WHERE uniquename = @solutionname"
 $solutionIdResult = Invoke-DataverseSQL -Sql $solutionIdSql -Parameters @{
@@ -41,6 +39,7 @@ $dependencies = Invoke-DataverseSQL -Sql $sql -Parameters @{
 
 # For each dependency, find which solution(s) contain the required component
 $badDeps = @()
+$lookupCache = @{}
 
 foreach ($dep in $dependencies) {
     $requiredsolutioncomponents = @()
@@ -82,7 +81,7 @@ FROM solution s
 WHERE s.solutionid = @requiredBaseSolutionId
 "@
 
-        $baseSolutionRows = @(Invoke-DataverseSQL -Sql $baseSolutionSql -Parameters @{
+        $baseSolutionRows = @(Invoke-CachedValidationQuery -Cache $lookupCache -Key "base/$requiredBaseSolutionId" -Sql $baseSolutionSql -Parameters @{
             requiredBaseSolutionId = $requiredBaseSolutionId
         })
 
@@ -154,7 +153,7 @@ WHERE sc.objectid = @requiredComponentId
 ORDER BY s.installedon ASC, s.createdon ASC
 "@
     
-    $requiredsolutioncomponents = @(Invoke-DataverseSQL -Sql $componentSql -Parameters @{
+    $requiredsolutioncomponents = @(Invoke-CachedValidationQuery -Cache $lookupCache -Key "component/$requiredComponentType/$requiredComponentId" -Sql $componentSql -Parameters @{
         requiredComponentId = $requiredComponentId
         requiredComponentType = $requiredComponentType
         solutionname = $context.solutionname
@@ -188,7 +187,7 @@ WHERE sc.objectid = @requiredParentId
 ORDER BY s.installedon ASC, s.createdon ASC
 "@
         
-        $requiredsolutioncomponents = @(Invoke-DataverseSQL -Sql $parentSql -Parameters @{
+        $requiredsolutioncomponents = @(Invoke-CachedValidationQuery -Cache $lookupCache -Key "parent/$requiredParentId" -Sql $parentSql -Parameters @{
             requiredParentId = $requiredParentId
             solutionname = $context.solutionname
         })
@@ -219,15 +218,15 @@ ORDER BY s.installedon ASC, s.createdon ASC
 
         # Load required component name
         $reqNames = if ($reqSolutionId) {
-            getComponentNames -componentId $requiredComponentId -componentType $requiredComponentType -solutionId $reqSolutionId
+            getComponentNames -componentId $requiredComponentId -componentType $requiredComponentType -solutionId $reqSolutionId -ValidationContext $context
         }
         else {
-            getComponentNames -componentId $requiredComponentId -componentType $requiredComponentType
+            getComponentNames -componentId $requiredComponentId -componentType $requiredComponentType -ValidationContext $context
         }
         
         # Load dependent component name (from the solution being validated)
         Write-Verbose "Looking up dependent component: ID=$dependentComponentId, Type=$dependentComponentType"
-        $depNames = getComponentNames -componentId $dependentComponentId -componentType $dependentComponentType -solutionId $solutionId
+        $depNames = getComponentNames -componentId $dependentComponentId -componentType $dependentComponentType -solutionId $solutionId -ValidationContext $context
         
         # Get parent table name for dependent component using parent ID from solutioncomponent
         $dependentParentName = $null
@@ -237,10 +236,10 @@ FROM solutioncomponent sc
 LEFT JOIN solutioncomponent sc2 ON sc.rootsolutioncomponentid = sc2.solutioncomponentid
 WHERE sc.objectid = @componentId AND sc.componenttype = @componentType
 "@
-        $parentResult = Invoke-DataverseSQL -Sql $parentSql -Parameters @{
+        $parentResult = @(Invoke-CachedValidationQuery -Cache $lookupCache -Key "dependentparent/$dependentComponentType/$dependentComponentId" -Sql $parentSql -Parameters @{
             componentId = $dependentComponentId
             componentType = $dependentComponentType
-        }
+        })
         
         if ($parentResult -and $parentResult.Length -gt 0 -and $parentResult[0].objectid) {
             $parentId = $parentResult[0].objectid.ToString()
@@ -249,7 +248,7 @@ WHERE sc.objectid = @componentId AND sc.componenttype = @componentType
             # Skip if parentId is empty or null
             if (-not [string]::IsNullOrWhiteSpace($parentId)) {
                 # Get the parent component name
-                $parentNames = getComponentNames -componentId $parentId -componentType $parentType -solutionId $solutionId
+                $parentNames = getComponentNames -componentId $parentId -componentType $parentType -solutionId $solutionId -ValidationContext $context
                 if ($parentNames) {
                     $dependentParentName = $parentNames.ComponentSchemaName
                 }

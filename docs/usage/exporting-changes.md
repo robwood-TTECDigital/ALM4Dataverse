@@ -98,6 +98,103 @@ Review the resulting commit for unintended solution/data changes, then check [BU
 > appropriate, and rerun. EXPORT may already have updated Dataverse versions before a
 > later Git failure. See [importing changes](importing-changes.md) for safe synchronization.
 
+## Export Processing and Validation
+
+Managed and unmanaged packages are exported in parallel by default, including
+both packages of the same solution. Unpacking, change detection and version
+updates still run in the configured solution order.
+
+In the TTEC Digital fork, custom validation can start after a solution is
+unpacked while later exports are still running. This is used only when the
+standard fork post-export hook is first and no legacy `PostExportScript` is
+configured. Otherwise validation runs in the post-export hook, after exports.
+Custom hooks, data exports, Power Pages downloads and Synapse exports keep their
+existing order.
+
+The defaults in `alm-config.psd1` are:
+
+```powershell
+export = @{
+  parallel = $true
+  maxParallel = 2
+  maxConcurrentOperations = 4
+}
+validation = @{
+  parallel = $true
+  maxParallel = 4
+}
+```
+
+The defaults allow up to two concurrent package exports and up to four concurrent
+custom rules, subject to a shared limit of four operations. The limit also applies to version updates and
+validation run by post-export hooks. Each running rule counts as one operation;
+custom hooks are not limited by these settings.
+
+Set `export.parallel = $false` for sequential exports, or
+`validation.parallel = $false` for sequential rules. These settings are
+independent. The parallelism limits accept integers from `1` to `8`. See
+[ALM Configuration](../config/alm-config.md#export-processing) for the full settings reference.
+
+Validation still runs for unchanged solutions. Allowed dependencies include
+configured external dependencies and preceding solutions only. Error, warning,
+disabled and rule/component override behaviour is unchanged. Results are reported
+in rule order, not completion order. Custom EXPORT validation is separate from
+the BUILD PAC checker.
+
+## Export Logs
+
+Live messages identify the solution and phase, with custom rule events formatted
+as `[Solution][Validate:Rule]`. Detailed export and validation output is grouped
+by solution and phase. Every line of a finding identifies its solution.
+
+Rule execution failures print the actual error and its exception context directly
+in the standard log, with `[Solution][Validate:Rule]` on every line. Detailed
+artifacts are additional diagnostics, not a replacement for the error in the log.
+
+The final summary reports validation status, finding counts and available
+timings for each solution, including on failure. Export duration measures elapsed
+time, not the sum of concurrent export times. `NotReported` means no validation
+summary was produced; it does not mean validation passed.
+
+Detailed logs, findings, rule timings and `summary.json` are retained under
+`export-logs` in the artifact staging directory. Azure DevOps publishes the
+`export-logs` artifact, and GitHub Actions uploads it even if export fails.
+Local runs retain the same files, including logs from rules that produce no
+output or fail.
+
+For local performance measurements, `pipelines/scripts/export.ps1 -PassThru`
+returns total elapsed seconds and export/validation timings. Authentication and dependency
+installation are outside that measurement.
+
+## Runtime Measurement
+
+A single before/after pair on 2026-10-12 measured the complete EXPORT script for
+`TestSolution1` and `TestSolution1RuntimeDependencies`, not just individual rules:
+
+| Configuration | Total elapsed time |
+| --- | --- |
+| Merge-only baseline, before the export improvements | 162.052 seconds |
+| All export improvements enabled with default concurrency settings | 82.021 seconds |
+| Reduction | 80.031 seconds (49.4%) |
+
+Both runs used the same populated solution sources and the same Dataverse
+environment, with `Rnwood.Dataverse.Data.PowerShell` 3.0.3 and PAC 2.7.4. The
+baseline was the fork before these export and validation improvements. The
+improved run used the default concurrency settings shown above.
+
+Each run reported the same two fixture findings. Exported sources and environment
+solution versions stayed unchanged. Git writes and version updates
+were disabled for the measurement; validation ran in warning mode. Timing
+included solution exports, source processing, post-export hooks and validation,
+but excluded authentication, dependency installation and final Git commit/push.
+
+> [!NOTE]
+> This is one measured pair, not an average or median. The improved run followed
+> the baseline, so cache warmth and Dataverse service variability can affect the
+> comparison. These test solutions primarily contain tables, columns and lookup
+> relationships; apps, flows, large datasets and custom hooks can have different
+> runtime characteristics. The result is not a performance guarantee.
+
 ## Viewing Exported Changes
 
 **Azure DevOps:**

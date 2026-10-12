@@ -28,7 +28,7 @@ $results | ForEach-Object {
     $componentType = $_.componenttype
     
     # Load component names
-    $names = getComponentNames -componentId $componentId -componentType $componentType -solutionId $solutionId
+    $names = getComponentNames -componentId $componentId -componentType $componentType -solutionId $solutionId -ValidationContext $context
     $componentSchemaName = if ($names) { $names.ComponentSchemaName } else { $null }
     
     # Check if this component should skip validation

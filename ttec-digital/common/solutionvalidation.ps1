@@ -1,14 +1,51 @@
+. "$PSScriptRoot/validation-workers.ps1"
+
+function Invoke-CachedValidationQuery {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$Cache,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Sql,
+        [Parameter(Mandatory)][hashtable]$Parameters
+    )
+
+    if (-not $Cache.ContainsKey($Key)) {
+        $Cache[$Key] = @(Invoke-DataverseSQL -Sql $Sql -Parameters $Parameters)
+    }
+
+    $Cache[$Key] | Select-Object -Property *
+}
 
 # Helper function to load component names using PowerShell cmdlets
 function getComponentNames(
     [Parameter(Mandatory)][string] $componentId,
     [Parameter(Mandatory)][int] $componentType,
-    [Parameter()][string] $solutionId
+    [Parameter()][string] $solutionId,
+    [Parameter()][psobject]$ValidationContext
 ) {
     
     # Cache for component definitions to avoid repeated lookups
     if (-not (Test-Path variable:script:componentDefinitionCache)) {
         Set-Variable -Scope Script -Name componentDefinitionCache -Value @{}
+    }
+
+    if (-not (Test-Path variable:script:componentNameCache)) {
+        Set-Variable -Scope Script -Name componentNameCache -Value @{}
+    }
+    $definitionCache = $script:componentDefinitionCache
+    $nameCache = $script:componentNameCache
+    if ($null -ne $ValidationContext) {
+        if (-not $ValidationContext.PSObject.Properties['ComponentDefinitionCache']) {
+            $ValidationContext | Add-Member -NotePropertyName ComponentDefinitionCache -NotePropertyValue @{}
+        }
+        if (-not $ValidationContext.PSObject.Properties['ComponentNameCache']) {
+            $ValidationContext | Add-Member -NotePropertyName ComponentNameCache -NotePropertyValue @{}
+        }
+        $definitionCache = $ValidationContext.ComponentDefinitionCache
+        $nameCache = $ValidationContext.ComponentNameCache
+    }
+    $componentKey = "$componentType/$componentId"
+    if ($nameCache.ContainsKey($componentKey)) {
+        return $nameCache[$componentKey]
     }
     
     # Determine the table name and column names based on component type
@@ -17,8 +54,8 @@ function getComponentNames(
     $displaynamecolumn = $null
     
     # Try to get from cache first
-    if ($script:componentDefinitionCache.ContainsKey($componentType)) {
-        $cached = $script:componentDefinitionCache[$componentType]
+    if ($definitionCache.ContainsKey($componentType)) {
+        $cached = $definitionCache[$componentType]
         $tablename = $cached.TableName
         $schemanamecolumn = $cached.SchemaNameColumn
         $displaynamecolumn = $cached.DisplayNameColumn
@@ -106,7 +143,7 @@ function getComponentNames(
         }
         
         # Cache the result (even if null)
-        $script:componentDefinitionCache[$componentType] = @{
+        $definitionCache[$componentType] = @{
             TableName = $tablename
             SchemaNameColumn = $schemanamecolumn
             DisplayNameColumn = $displaynamecolumn
@@ -171,13 +208,16 @@ function getComponentNames(
                 }
             }
             
-            return [PSCustomObject]@{
+            $names = [PSCustomObject]@{
                 ComponentSchemaName = $schemaName
                 ComponentDisplayName = $displayName
             }
+            $nameCache[$componentKey] = $names
+            return $names
         }
         
         Write-Verbose "Component not found: ComponentId=$componentId, ComponentType=$componentType, Table=$tablename"
+        $nameCache[$componentKey] = $null
         return $null
         
     } catch {
@@ -266,11 +306,17 @@ function validateSolution(
     [Parameter(Mandatory)][string] $solutionname,
     #List of solution names this solution is allowed to depend on
     [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$validdependencysolutionnames,
-    [Parameter(Mandatory)][string] $outputpath,
-    [Parameter(Mandatory)][string] $solutionfile,
+    [Parameter()][string] $outputpath,
+    [Parameter()][string] $solutionfile,
     [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ignoresolutionnames,
     #Solution configuration from alm-config.psd1
-    [Parameter()][hashtable]$solutionconfig = @{}
+    [Parameter()][hashtable]$solutionconfig = @{},
+    [Parameter()][AllowEmptyCollection()][object[]]$PrecomputedResults,
+    [hashtable]$ValidationSettings = @{ parallel = $true; maxParallel = 4 },
+    [string]$LogDirectory = '',
+    [hashtable]$SummaryStore = @{},
+    [System.Threading.SemaphoreSlim]$OperationBudget,
+    [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
 ) {
 
 <#
@@ -300,6 +346,9 @@ function validateSolution(
 #>
 
     # Custom Rules
+    $validationClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $ruleTimings = [System.Collections.Generic.List[object]]::new()
+    $SummaryStore[$solutionname] = [pscustomobject]@{ Status = 'Failed'; Errors = 0; Warnings = 0; Seconds = $null; Rules = @() }
 
     # Determine the effective validation mode for this solution
     $validationMode = 'error'  # default
@@ -309,7 +358,8 @@ function validateSolution(
 
     # Check if validation is completely disabled for this solution
     if ($validationMode -eq 'disabled') {
-        $warning = "WARNING: Validation has been completely disabled for solution '$solutionname' as configured in alm-config.psd1"
+        $SummaryStore[$solutionname].Status = 'Disabled'
+        $warning = "[$solutionname][Validate] Validation disabled by configuration"
         Write-Warning $warning
         if ($env:TF_BUILD) {
             write-host "##vso[task.logissue type=warning]$warning"
@@ -319,18 +369,24 @@ function validateSolution(
 
     # Display info if in warning mode
     if ($validationMode -eq 'warning') {
-        Write-Host "INFO: Validation is in warning mode for solution '$solutionname' - issues will not fail the pipeline"
+        Write-Host "[$solutionname][Validate] Warning mode; findings will not fail the pipeline"
     }
 
     $errors = @()
     $warnings = @()
 
-    validateSolutionInternal `
-        -solutionname $solutionname `
-        -validdependencysolutionnames:$validdependencysolutionnames `
-        -ignoresolutionnames:$ignoresolutionnames `
-        -solutionconfig:$solutionconfig `
-        -validationMode:$validationMode | foreach-object {
+    $results = if ($PSBoundParameters.ContainsKey('PrecomputedResults')) {
+        $PrecomputedResults
+    } else {
+        validateSolutionInternal `
+            -solutionname $solutionname `
+            -validdependencysolutionnames:$validdependencysolutionnames `
+            -ignoresolutionnames:$ignoresolutionnames `
+            -solutionconfig:$solutionconfig `
+            -validationMode:$validationMode -ParallelRules:$ValidationSettings.parallel -MaxParallel $ValidationSettings.maxParallel `
+            -LogDirectory $LogDirectory -RuleTimings $ruleTimings -OperationBudget $OperationBudget -CancellationToken $CancellationToken
+    }
+    $results | foreach-object {
         # Results from validation rules are objects with Message and IsWarning properties
         if ($_.IsWarning) {
             $warnings += $_.Message
@@ -352,6 +408,20 @@ function validateSolution(
     }
 
     # Output warnings
+    $validationClock.Stop()
+    $SummaryStore[$solutionname] = [pscustomobject]@{
+        Status = $(if ($errors.Length) { 'Failed' } else { 'Passed' })
+        Errors = $errors.Length
+        Warnings = $warnings.Length
+        Seconds = $(if ($PSBoundParameters.ContainsKey('PrecomputedResults')) { $null } else { $validationClock.Elapsed.TotalSeconds })
+        Rules = $ruleTimings.ToArray()
+    }
+    if ($LogDirectory) {
+        New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+        ConvertTo-Json -InputObject @($results) -Depth 8 | Set-Content -LiteralPath (Join-Path $LogDirectory 'findings.json') -Encoding utf8
+    }
+    $warnings = @(foreach ($message in $warnings) { (Format-AlmLogLine -SolutionName $solutionname -Phase Validate -Text $message) -join "`r`n" })
+    $errors = @(foreach ($message in $errors) { (Format-AlmLogLine -SolutionName $solutionname -Phase Validate -Text $message) -join "`r`n" })
     if ($warnings.Length) {
         if ($env:TF_BUILD) {
             $warnings | foreach-object { write-host "##vso[task.logissue type=warning]$_`r`n" }
@@ -405,7 +475,7 @@ function getValidationRuleMode(
         
         # Determine the mode for this configuration
         $mode = 'error'  # default
-        if ($skipConfig.mode) {
+        if ($skipConfig.ContainsKey('mode') -and $skipConfig.mode) {
             $mode = $skipConfig.mode.ToLower()
         }
         
@@ -413,7 +483,7 @@ function getValidationRuleMode(
         # This function handles component-specific configurations
         
         # Check componentId match
-        if ($skipConfig.componentId) {
+        if ($skipConfig.ContainsKey('componentId') -and $skipConfig.componentId) {
             if ($skipConfig.componentId.ToString() -eq $componentId.ToString()) {
                 Write-Verbose "Applying mode '$mode' for rule '$ruleName' on component ID '$componentId' (configured in alm-config.psd1)"
                 return $mode
@@ -422,7 +492,7 @@ function getValidationRuleMode(
         }
         
         # Check componentType match
-        if ($skipConfig.componentType) {
+        if ($skipConfig.ContainsKey('componentType') -and $skipConfig.componentType) {
             if ($skipConfig.componentType -eq $componentType) {
                 Write-Verbose "Applying mode '$mode' for rule '$ruleName' on component type '$componentType' (configured in alm-config.psd1)"
                 return $mode
@@ -431,7 +501,7 @@ function getValidationRuleMode(
         }
         
         # Check componentSchemaName match
-        if ($skipConfig.componentSchemaName -and $componentSchemaName) {
+        if ($skipConfig.ContainsKey('componentSchemaName') -and $skipConfig.componentSchemaName -and $componentSchemaName) {
             if ($skipConfig.componentSchemaName -eq $componentSchemaName) {
                 Write-Verbose "Applying mode '$mode' for rule '$ruleName' on component schema name '$componentSchemaName' (configured in alm-config.psd1)"
                 return $mode
@@ -454,10 +524,20 @@ function validateSolutionInternal(
     #Solution configuration from alm-config.psd1
     [Parameter()][hashtable]$solutionconfig = @{},
     #Validation mode: 'error' or 'warning'
-    [Parameter()][string]$validationMode = 'error'
+    [Parameter()][string]$validationMode = 'error',
+    [switch]$ParallelRules,
+    [ValidateRange(1, 8)][int]$MaxParallel = 4,
+    [System.Threading.SemaphoreSlim]$OperationBudget,
+    [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None,
+    $LogEvents,
+    [string]$LogDirectory = '',
+    [System.Collections.Generic.List[object]]$RuleTimings
 ) {   
 
-    write-host "Validating solution $solutionname"
+    $script:componentDefinitionCache = @{}
+    $script:componentNameCache = @{}
+
+    Send-AlmWorkerEvent -Events $LogEvents -SolutionName $solutionname -Phase Validate -Message 'Preparing rules'
 
     $context = [PSCustomObject]@{
         solutionname                 = $solutionname;
@@ -465,8 +545,12 @@ function validateSolutionInternal(
         ignoresolutionnames          = $ignoresolutionnames;
         solutionconfig               = $solutionconfig;
         validationMode               = $validationMode;
+        ComponentDefinitionCache     = @{};
+        ComponentNameCache           = @{};
+        ruleMode                     = 'error';
     }
 
+    $rules = [System.Collections.Generic.List[object]]::new()
     get-childitem $PSScriptRoot/../validationrules -filter *.ps1 | ForEach-Object {
         $ruleName = $_.BaseName
         
@@ -478,21 +562,21 @@ function validateSolutionInternal(
             foreach ($skipConfig in $solutionconfig.skipValidationRules) {
                 if ($skipConfig.ruleName -eq $ruleName) {
                     # If no component-specific filters, this applies to the entire rule
-                    if (-not $skipConfig.componentType -and -not $skipConfig.componentId -and -not $skipConfig.componentSchemaName) {
+                    $hasComponentFilter = @('componentType', 'componentId', 'componentSchemaName') | Where-Object { $skipConfig.ContainsKey($_) -and $skipConfig[$_] }
+                    if (-not $hasComponentFilter) {
                         # Determine mode
                         $configMode = 'error'  # default
-                        if ($skipConfig.mode) {
+                        if ($skipConfig.ContainsKey('mode') -and $skipConfig.mode) {
                             $configMode = $skipConfig.mode.ToLower()
                         }
                         
                         if ($configMode -eq 'skip') {
                             $skipRule = $true
-                            Write-Host "  Skipping rule '$ruleName' (configured in alm-config.psd1)"
+                            Send-AlmWorkerEvent -Events $LogEvents -SolutionName $solutionname -Phase "Validate:$ruleName" -Message 'Skipped by configuration'
                             break
                         }
                         elseif ($configMode -eq 'warning') {
                             $ruleMode = 'warning'
-                            Write-Host "  Running rule '$ruleName' in warning mode (configured in alm-config.psd1)"
                             break
                         }
                     }
@@ -501,14 +585,9 @@ function validateSolutionInternal(
         }
         
         if (-not $skipRule) {
-            if ($ruleMode -eq 'error') {
-                write-host "  Running rule '$ruleName'"
-            }
-            
-            # Add rule mode to context for rules to use
-            $context | Add-Member -NotePropertyName ruleMode -NotePropertyValue $ruleMode -Force
-            
-            & $_.FullName $context
+            $rules.Add([pscustomobject]@{ Name = $ruleName; Path = $_.FullName; Mode = $ruleMode })
         }
     }
+    Invoke-AlmValidationRules -Context $context -Rules $rules.ToArray() -Parallel:$ParallelRules -MaxParallel $MaxParallel `
+        -OperationBudget $OperationBudget -CancellationToken $CancellationToken -LogEvents $LogEvents -LogDirectory $LogDirectory -RuleTimings $RuleTimings
 }

@@ -93,44 +93,45 @@ if ($config.Contains("PostExportScript") -and $config.PostExportScript) {
 synapse_export -config $config
 
 
-$validationoutputpath = [IO.Path]::GetTempPath() + [IO.Path]::GetRandomFileName()
-New-Item -ItemType Directory -Path $validationoutputpath | Out-Null
-
 $validdependencysolutionnames = @()
 if ($config.ContainsKey("ExternalDependencySolutionNames")) {
-    $validdependencysolutionnames += @($config.ExternalDependencySolutionNames)
+    $validdependencysolutionnames += @($config['ExternalDependencySolutionNames'] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
 }
 if ($config.ContainsKey("DependencySolutions")) {
-    $validdependencysolutionnames += @($config.DependencySolutions)
+    $validdependencysolutionnames += @($config['DependencySolutions'] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
 }
 $ignoresolutionnames = @()
 if ($config.ContainsKey("IgnoreSolutions")) {
-    $ignoresolutionnames = @($config.IgnoreSolutions)
+    $ignoresolutionnames = @($config['IgnoreSolutions'] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
 }
+$validationSettings = Get-AlmValidationSettings -Config $config
 
 foreach ($solutionconfig in $config.solutions) {
 
 
-    Write-Host "Validating solution '$($solutionconfig.name)'..."
+    Write-Host "[$($solutionconfig.name)][Validate] Reporting validation"
 
-    $solutionzippath = "$($context.TempDirectory)/$($solutionconfig.name)-validation.zip"
-    $SolutionFolderPath = "$SourceDirectory/solutions/$($solutionconfig.name)"
-
-    write-host "##[debug] Compressing solution folder '$SolutionFolderPath' to '$solutionzippath'"
-
-    Compress-DataverseSolutionFile -PackageType Unmanaged -OutputPath $solutionzippath -Path $SolutionFolderPath
-
+    $validationParameters = @{ ValidationSettings = $validationSettings }
+    if ($context.ContainsKey('ExportOperationBudget') -and $context['ExportOperationBudget'] -is [System.Threading.SemaphoreSlim]) {
+        $validationParameters.OperationBudget = $context['ExportOperationBudget']
+    }
+    if ($context.ContainsKey('ExportCancellationToken') -and $context['ExportCancellationToken'] -is [System.Threading.CancellationToken]) {
+        $validationParameters.CancellationToken = $context['ExportCancellationToken']
+    }
+    if ($context.ContainsKey('ExportValidationSummaries') -and $context['ExportValidationSummaries'] -is [hashtable]) {
+        $validationParameters.SummaryStore = $context['ExportValidationSummaries']
+    }
+    if ($context.ContainsKey('ArtifactStagingDirectory') -and $context['ArtifactStagingDirectory']) {
+        $validationParameters.LogDirectory = Join-Path $context['ArtifactStagingDirectory'] "export-logs/$($solutionconfig.name)"
+    }
+    if ($context.ContainsKey('ExportValidationResults') -and $context['ExportValidationResults'] -is [hashtable] -and $context['ExportValidationResults'].ContainsKey($solutionconfig.name) -and $null -ne $context['ExportValidationResults'][$solutionconfig.name]) {
+        $validationParameters.PrecomputedResults = @($context['ExportValidationResults'][$solutionconfig.name])
+    }
     validateSolution `
         -solutionname $solutionconfig.name `
         -validdependencysolutionnames $validdependencysolutionnames `
-        -outputpath $validationoutputpath `
-        -solutionfile $solutionzippath `
         -ignoresolutionnames $ignoresolutionnames `
-        -solutionconfig $solutionconfig
+        -solutionconfig $solutionconfig @validationParameters
 
     $validdependencysolutionnames += $solutionconfig.name
-}
-
-Get-ChildItem $validationoutputpath | ForEach-Object {
-    write-host "##vso[artifact.upload]containerfolder=solution-validation;artifactname=$($_.Name)]$($_.FullName)"
 }

@@ -1,6 +1,5 @@
 $rnwoodModule = Get-Module -Name Rnwood.Dataverse.Data.PowerShell | Select-Object -First 1
 if (-not $rnwoodModule) {
-  Write-Host 'Dataverse SDK loader: importing Rnwood.Dataverse.Data.PowerShell.'
   $rnwoodModule = Get-Module -ListAvailable -Name Rnwood.Dataverse.Data.PowerShell |
     Sort-Object Version -Descending |
     Select-Object -First 1
@@ -11,7 +10,6 @@ if (-not $rnwoodModule) {
   Import-Module $rnwoodModule.Path -Global -ErrorAction Stop
   $rnwoodModule = Get-Module -Name Rnwood.Dataverse.Data.PowerShell | Select-Object -First 1
 }
-Write-Host "Dataverse SDK loader: using Rnwood.Dataverse.Data.PowerShell $($rnwoodModule.Version) from '$($rnwoodModule.ModuleBase)'."
 
 $sdkAssemblyNames = @('Microsoft.Xrm.Sdk', 'Microsoft.Crm.Sdk.Proxy')
 $loadedSdkAssemblies = [System.AppDomain]::CurrentDomain.GetAssemblies() |
@@ -45,13 +43,10 @@ foreach ($sdkAssemblyName in $sdkAssemblyNames) {
     if (-not $sdkAssemblyPath) {
       throw "$sdkAssemblyName was not loaded by Rnwood.Dataverse.Data.PowerShell and was not found under '$($rnwoodModule.ModuleBase)'."
     }
-
-    Write-Host "Dataverse SDK loader: loading $sdkAssemblyName into the Rnwood load context from '$($sdkAssemblyPath.FullName)'."
     $sdkAssembly = $rnwoodLoadContext.LoadFromAssemblyPath($sdkAssemblyPath.FullName)
   }
 
   $assemblyLoadContext = [System.Runtime.Loader.AssemblyLoadContext]::GetLoadContext($sdkAssembly)
-  Write-Host "Dataverse SDK loader: using $sdkAssemblyName from load context '$($assemblyLoadContext.Name)' at '$($sdkAssembly.Location)'."
 
   foreach ($sdkType in $sdkAssembly.GetExportedTypes()) {
     if (-not $typeAcceleratorMap.ContainsKey($sdkType.FullName)) {
@@ -60,6 +55,3 @@ foreach ($sdkAssemblyName in $sdkAssemblyNames) {
     }
   }
 }
-
-Write-Host "Dataverse SDK loader: registered $registeredTypeCount Dataverse SDK type accelerators."
-Write-Host 'Dataverse SDK loader: Microsoft.Xrm.Sdk.Query.FetchExpression is available from the Rnwood load context.'

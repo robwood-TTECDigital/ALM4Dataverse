@@ -13,6 +13,17 @@ This fork adds:
   - Azure Synapse component management
   - Schema migration tracking.
 
+Solution export and custom validation run in parallel by default, with a shared
+limit of four remote operations. Export logs identify each solution and rule,
+with detailed logs and a final summary retained as artifacts.
+See [Exporting changes](docs/usage/exporting-changes.md) for the processing order
+and [ALM Configuration](docs/config/alm-config.md#export-processing) for concurrency settings.
+
+A single two-solution benchmark reduced complete EXPORT runtime from 162.052 to
+82.021 seconds (49.4%), with identical findings and unchanged sources/versions.
+See [measurement scope](docs/usage/exporting-changes.md#runtime-measurement) before
+applying that result to other environments.
+
 Upstream ALM4Dataverse now includes GitHub Actions support. The older fork-specific GitHub workflow model is deprecated.
 See `ttec-digital/docs/github-actions-setup.md` for migration guidance if you previously adopted the fork GitHub setup.
 

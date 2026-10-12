@@ -2,6 +2,32 @@
 
 This folder contains automated tests for the Dataverse ALM validation rules.
 
+## Export Runtime Scenario
+
+From the repository root, connect to a disposable development environment and initialize the fixture:
+
+```powershell
+Import-Module Rnwood.Dataverse.Data.PowerShell
+Get-DataverseConnection -Interactive -Url 'https://<environment>.crm.dynamics.com' -SetAsDefault
+./ttec-digital/tests/solutionvalidation/Initialize-ExportRuntimeScenario.ps1 -SolutionName TestSolution1
+```
+
+The script uses the existing solution publisher's prefix. It creates a consumer table with six text columns and six lookup columns in `TestSolution1`, plus a shared table in `TestSolution1RuntimeDependencies`. The lookup relationships reference the same shared table, providing cross-solution dependencies for validation tests. Only the fixture tables are published; no business records are created and the existing solution version is not changed. Setup can be rerun without duplicating components.
+
+To test overlapping-component validation and error/warning reporting, add the consumer table's metadata to the companion solution too:
+
+```powershell
+./ttec-digital/tests/solutionvalidation/Initialize-ExportRuntimeScenario.ps1 -IncludeValidationViolations
+```
+
+This deliberately creates an overlapping-metadata validation finding. Subsequent setup runs without the switch do not remove that overlap. The tables use reserved `<prefix>_almruntimeconsumer` and `<prefix>_almruntimeshared` names; use one runtime fixture per publisher. To clean up, remove the consumer table's solution memberships, delete the consumer table before the referenced shared table, and remove the companion solution. Do not delete `TestSolution1` or its unrelated components.
+
+Run the offline export and validation regression tests separately; they do not require an environment connection:
+
+```powershell
+Invoke-Pester -Path ./ttec-digital/tests/solutionvalidation/ExportRuntime.Tests.ps1 -Output Detailed
+```
+
 ## Running Tests
 
 ### Prerequisites
