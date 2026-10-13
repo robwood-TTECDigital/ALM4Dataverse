@@ -55,6 +55,10 @@ function Start-AlmExportPipeline {
         [ValidateRange(1, 8)][int]$MaxParallel = 2
     )
 
+    $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($solution in $Config.solutions) {
+        if (-not $names.Add($solution.name)) { throw "Duplicate solution in export configuration: $($solution.name)" }
+    }
     $connection = Get-DataverseConnection -GetDefault
     $cloneMethod = $connection.GetType().GetMethods() | Where-Object { $_.Name -eq 'Clone' -and $_.GetParameters().Count -eq 1 } | Select-Object -First 1
     if (-not $cloneMethod) {
@@ -62,10 +66,10 @@ function Start-AlmExportPipeline {
     }
     $null = $connection.OrganizationDetail
     Get-Command Start-ThreadJob -ErrorAction Stop | Out-Null
-    $workDirectory = Join-Path $TempDirectory ('export-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
     $validateEarly = Test-AlmEarlyExportValidation -Config $Config
     $exportSettings = Get-AlmExportSettings -Config $Config
+    $workDirectory = Join-Path $TempDirectory ('export-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
     $state = @{
         PendingExports = [System.Collections.Generic.Queue[object]]::new()
         ActiveExports = [System.Collections.Generic.List[object]]::new()
@@ -79,6 +83,7 @@ function Start-AlmExportPipeline {
         Connection = $connection
         CloneMethod = $cloneMethod
         ModulePath = (Get-Module Rnwood.Dataverse.Data.PowerShell | Select-Object -First 1).Path
+        HelpersPath = $PSCommandPath
         ValidationRoot = (Join-Path $PSScriptRoot '../../ttec-digital/common')
         WorkDirectory = $workDirectory
         MaxParallel = $MaxParallel
@@ -93,9 +98,6 @@ function Start-AlmExportPipeline {
         LogDirectory = ''
     }
     foreach ($solution in $Config.solutions) {
-        if ($state.CompletedExports.ContainsKey($solution.name)) {
-            throw "Duplicate solution in export configuration: $($solution.name)"
-        }
         $state.CompletedExports[$solution.name] = @{}
         foreach ($managed in @($false, $true)) {
             $suffix = if ($managed) { '_managed' } else { '' }
@@ -115,6 +117,7 @@ function Start-AlmQueuedExports {
     while ($State.PendingExports.Count -and $State.ActiveExports.Count -lt $State.MaxParallel) {
         $task = $State.PendingExports.Dequeue()
         $client = $State.CloneMethod.Invoke($State.Connection, [object[]]@($null))
+        if ($null -eq $client) { throw "[$($task.SolutionName)][Export] Connection cloning returned no client." }
         $State.Clients.Add($client)
         $job = Start-ThreadJob -ThrottleLimit 32 -ArgumentList @($State.ModulePath, $client, $task, $State.OperationBudget, $State.Cancellation.Token, $State.LogEvents, "$PSScriptRoot/../../ttec-digital/common/validation-workers.ps1") -ScriptBlock {
             param($ModulePath, $Client, $Task, $Budget, $Cancellation, $Events, $LogHelpers)
@@ -131,6 +134,9 @@ function Start-AlmQueuedExports {
                 Send-AlmWorkerEvent -Events $Events -SolutionName $Task.SolutionName -Phase $phase -Message 'Started'
                 Export-DataverseSolution -SolutionName $Task.SolutionName -Managed:$Task.Managed -OutFile $Task.Path -Connection $Client
                 Send-AlmWorkerEvent -Events $Events -SolutionName $Task.SolutionName -Phase $phase -Message "Completed in $([math]::Round(([datetime]::UtcNow-$started).TotalSeconds,2))s"
+            } catch {
+                Send-AlmWorkerEvent -Events $Events -SolutionName $Task.SolutionName -Phase $phase -Message "Failed: $(($_ | Out-String).TrimEnd())"
+                throw
             } finally {
                 if ($acquired) { $Budget.Release() | Out-Null }
             }
@@ -222,9 +228,11 @@ function Receive-AlmExportJob {
     if ($details.Count) {
         if ($env:TF_BUILD) { Write-Host "##[group][$solutionName][$phase] Details" }
         elseif ($env:GITHUB_ACTIONS) { Write-Host "::group::[$solutionName][$phase] Details" }
-        $details | ForEach-Object { Write-Host $_ }
-        if ($env:TF_BUILD) { Write-Host '##[endgroup]' }
-        elseif ($env:GITHUB_ACTIONS) { Write-Host '::endgroup::' }
+        try { $details | ForEach-Object { Write-Host $_ } }
+        finally {
+            if ($env:TF_BUILD) { Write-Host '##[endgroup]' }
+            elseif ($env:GITHUB_ACTIONS) { Write-Host '::endgroup::' }
+        }
     }
     if ($Job.State -ne 'Completed' -or $result.Count -ne 1 -or @($records | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }).Count) {
         throw "[$solutionName][$phase] Worker failed: $($Job.JobStateInfo.Reason)"
@@ -313,22 +321,25 @@ function Stop-AlmExportPipeline {
     param([Parameter(Mandatory)][hashtable]$State)
 
     $State.Cancellation.Cancel()
-    foreach ($job in $State.Jobs) {
-        if ($job.State -notin @('Completed', 'Failed', 'Stopped')) { Stop-Job -Job $job }
-        if ($job.HasMoreData) {
-            try {
-                $result = Receive-AlmExportJob -Job $job -LogDirectory $State.LogDirectory
-                $State.Timings.Add($result)
-            } catch {
-                Write-Host ([string]$_)
+    try {
+        foreach ($job in $State.Jobs) {
+            if ($job.State -notin @('Completed', 'Failed', 'Stopped')) { Stop-Job -Job $job }
+            if ($job.HasMoreData) {
+                try {
+                    $result = Receive-AlmExportJob -Job $job -LogDirectory $State.LogDirectory
+                    $State.Timings.Add($result)
+                } catch {
+                    Write-Host ([string]$_)
+                }
             }
+            Remove-Job -Job $job -Force
         }
-        Remove-Job -Job $job -Force
+        Write-AlmExportEvents -State $State
+    } finally {
+        foreach ($client in $State.Clients) { $client.Dispose() }
+        $State.OperationBudget.Dispose()
+        $State.Cancellation.Dispose()
+        $State.LogEvents.Signal.Dispose()
+        Remove-Item -LiteralPath $State.WorkDirectory -Recurse -Force
     }
-    Write-AlmExportEvents -State $State
-    foreach ($client in $State.Clients) { $client.Dispose() }
-    $State.OperationBudget.Dispose()
-    $State.Cancellation.Dispose()
-    $State.LogEvents.Signal.Dispose()
-    Remove-Item -LiteralPath $State.WorkDirectory -Recurse -Force
 }
