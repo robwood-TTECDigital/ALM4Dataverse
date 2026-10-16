@@ -21,6 +21,8 @@
     # Each entry is a hashtable with keys
     # - name: unique solution name.
     # - deployUnmanaged: (optional) boolean indicating whether to deploy unmanaged version.
+    # - mappings: (optional) ordered SolutionPackager directives used by BUILD and EXPORT.
+    #   Each item can include a buildCommand that runs before packing during BUILD.
     # - serviceAccountUpnConfigKey: (optional) name of the environment configuration key containing
     #   the service account UPN to use when activating processes in this solution.
     #   The default is 'DataverseServiceAccountUpn'
@@ -30,6 +32,29 @@
         # Example:
         # @{
         #   name = 'ContosoCore'
+        #   mappings = @(
+        #     @{
+        #       type = 'FileToFile'
+        #       source = 'plugins/Contoso.Plugin/bin/Release/Contoso.Plugin.dll'
+        #       destination = 'PluginAssemblies\Contoso.Plugin.dll'
+        #       buildCommand = @{
+        #         name = 'Build plugin'
+        #         executable = 'dotnet'
+        #         arguments = @('build', 'plugins/Contoso.Plugin/Contoso.Plugin.csproj', '--configuration', 'Release')
+        #         workingDirectory = '.'
+        #       }
+        #     }
+        #     @{
+        #       type = 'Folder'
+        #       source = 'webresources'
+        #       destination = 'WebResources'
+        #     }
+        #     @{
+        #       type = 'FileToPath'
+        #       source = 'custom-resources'
+        #       destination = 'Other\*.json'
+        #     }
+        #   )
         #   solutionCheck = @{
         #     enabled = $true
         #     # Use 'none' to omit --ruleSet.
@@ -61,6 +86,9 @@
         }
     }
 
+    # Export limits count package operations, including managed and unmanaged
+    # packages of one solution. Both limits accept 1..8; hooks are not throttled.
+    # Missing/null/empty settings use defaults; explicit parallel = $false is kept.
     export = @{
         parallel = $true
         maxParallel = 2
@@ -73,6 +101,8 @@
         maxParallel = 4
     }
 
+    # Build-command and packing stages each use maxParallel (1..8), independently
+    # of solutionCheck.maxParallel. parallel = $false makes both stages sequential.
     build = @{
         parallel = $true
         maxParallel = 2
@@ -106,6 +136,12 @@
     #   - TempDirectory: path to temporary directory for export operations
     #   - EnvironmentName: name of the Dataverse environment being exported from
     #
+    # preExportSolution, postExportSolution:
+    #   - SourceDirectory, ArtifactStagingDirectory, TempDirectory, EnvironmentName
+    #   - SolutionName, SolutionConfig, SolutionIndex
+    #   - Connection: the cloned Dataverse connection for this hook; it is the default in parallel workers
+    #   - OperationBudget and CancellationToken: available for parallel exports
+    #
     # preDeploy, dataMigrations, postDeploy:
     #   - ArtifactsPath: path to the artifacts directory
     #   - UseUnmanagedSolutions: boolean indicating if unmanaged solutions are being deployed
@@ -113,6 +149,13 @@
     hooks = @{
         # Called by `pipelines/scripts/export.ps1` before exporting solutions.
         preExport  = @()
+
+        # Called before each solution's export begins.
+        preExportSolution = @()
+
+        # Called after each solution is unpacked and compared. In parallel export mode,
+        # hooks for different solutions run concurrently with the remaining exports.
+        postExportSolution = @()
 
         # Called by `pipelines/scripts/export.ps1` after exporting/unpacking/version bump logic.
         postExport = @(

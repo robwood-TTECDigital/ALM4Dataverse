@@ -1,6 +1,10 @@
 BeforeAll {
     $repoRoot = Split-Path $PSScriptRoot -Parent
     . (Join-Path $repoRoot 'pipelines/scripts/parallel-export.ps1')
+    function Expand-DataverseSolutionFile {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Mock command signature; Pester inspects these arguments.')]
+        param($Path, $OutputPath, $PackageType, [switch]$UnpackMsapp, $MappingFile)
+    }
 }
 
 Describe 'Parallel export configuration' {
@@ -54,9 +58,21 @@ Describe 'Parallel export logging' {
     }
 }
 
+Describe 'Parallel export mappings' {
+    It 'passes generated mapping files to the solution unpack cmdlet' {
+        Mock Expand-DataverseSolutionFile {}
+
+        Expand-AlmExportSolution -ZipPath 'solution.zip' -OutputPath 'solutions/Example' -MappingFile 'mapping.xml'
+
+        Should -Invoke Expand-DataverseSolutionFile -Times 1 -Exactly -ParameterFilter { $MappingFile -eq 'mapping.xml' }
+    }
+}
+
 Describe 'Parallel export runtime' {
     BeforeAll {
         . (Join-Path $repoRoot 'pipelines/scripts/common.ps1')
+        # This process-wide type coordinates separate runspaces. OrganizationDetail rejects a
+        # clone's first lazy read unless the parent primed it, exposing the SDK warm-up contract.
         if (-not ('AlmExportTestClient' -as [type])) {
             Add-Type -TypeDefinition @'
 public sealed class AlmExportTestClient : System.IDisposable
@@ -69,6 +85,7 @@ public sealed class AlmExportTestClient : System.IDisposable
     public static AlmExportTestClient Default { get; set; }
     public static int Peak { get; private set; }
     public static int VersionUpdates { get; set; }
+    public static bool HookDefaultCleared { get; set; }
     public static System.Threading.CountdownEvent Started { get; private set; }
     public static System.Threading.ManualResetEventSlim Release { get; private set; }
     public bool DetailsRead { get; private set; }
@@ -95,7 +112,7 @@ public sealed class AlmExportTestClient : System.IDisposable
     {
         Started?.Dispose();
         Release?.Dispose();
-        started = 0; active = 0; Peak = 0; VersionUpdates = 0; expectedStarts = count;
+        started = 0; active = 0; Peak = 0; VersionUpdates = 0; HookDefaultCleared = false; expectedStarts = count;
         Started = new System.Threading.CountdownEvent(count);
         Release = new System.Threading.ManualResetEventSlim(false);
         Default = new AlmExportTestClient();
@@ -116,8 +133,12 @@ public sealed class AlmExportTestClient : System.IDisposable
 }
 '@
         }
+        # Workers import this real fixture module because Pester mocks do not cross runspaces.
+        # Its export waits on the shared client barrier; pack/unpack only create comparison inputs.
         $script:exportModuleSource = @'
-function Get-DataverseConnection { param([switch]$GetDefault); [AlmExportTestClient]::Default }
+$script:DefaultConnection = $null
+function Set-DataverseConnectionAsDefault { param($Connection, [switch]$Clear); if ($Clear) { [AlmExportTestClient]::HookDefaultCleared = ($null -ne $script:DefaultConnection); $script:DefaultConnection = $null } else { $script:DefaultConnection = $Connection } }
+function Get-DataverseConnection { param([switch]$GetDefault); if ($null -ne $script:DefaultConnection) { return $script:DefaultConnection }; [AlmExportTestClient]::Default }
 function Write-TestSolution {
     param($OutputPath)
     New-Item -ItemType Directory -Path "$OutputPath/Other" -Force | Out-Null
@@ -137,9 +158,10 @@ function Export-DataverseSolution {
         else { Write-TestSolution $OutFolder }
     } finally { $Connection.EndExport() }
 }
-function Expand-DataverseSolutionFile { param($Path, $OutputPath, $PackageType, [switch]$UnpackMsapp); Write-TestSolution $OutputPath }
+function Expand-DataverseSolutionFile { param($Path, $OutputPath, $PackageType, [switch]$UnpackMsapp, $MappingFile); Write-TestSolution $OutputPath }
 function Compress-DataverseSolutionFile { param($PackageType, $OutputPath, $Path); Set-Content -LiteralPath $OutputPath -Value 'baseline' }
 function Set-DataverseSolution { param($UniqueName, $Version); [AlmExportTestClient]::VersionUpdates++ }
+function Invoke-DataverseSQL { param($Connection, $Sql); if ($null -eq $Connection) { $Connection = $script:DefaultConnection }; if ($null -eq $Connection) { throw 'A connection is required.' }; [pscustomobject]@{ Connection = $Connection; Sql = $Sql } }
 '@
     }
 
@@ -157,10 +179,14 @@ function Set-DataverseSolution { param($UniqueName, $Version); [AlmExportTestCli
         Set-Content -LiteralPath $modulePath -Value $script:exportModuleSource
         foreach ($module in $script:savedExportModules) { Remove-Module $module }
         Import-Module $modulePath -Global -Force
+        # The outer mapping-propagation seam also handles parent-runspace unpacking;
+        # worker runspaces use the importable module's separate implementation.
+        Mock Expand-DataverseSolutionFile { Write-TestSolution $OutputPath }
         [AlmExportTestClient]::Reset(1)
     }
 
     AfterEach {
+        # Unblock workers even after a failed assertion before stopping jobs and restoring modules.
         [AlmExportTestClient]::Release.Set()
         try {
             if ($null -ne $script:workerState) { Stop-AlmExportPipeline -State $script:workerState }
@@ -190,6 +216,7 @@ function Set-DataverseSolution { param($UniqueName, $Version); [AlmExportTestCli
         $state.Connection.DetailsRead | Should -BeTrue
         Test-Path $state.HelpersPath | Should -BeTrue
         Start-AlmQueuedExport -State $state
+        # Measure occupancy while workers are held, not elapsed wall time on a busy runner.
         [AlmExportTestClient]::Started.Wait([TimeSpan]::FromSeconds(10)) | Should -BeTrue
         [AlmExportTestClient]::Peak | Should -Be $Limit
         [AlmExportTestClient]::Release.Set()
@@ -220,6 +247,44 @@ function Set-DataverseSolution { param($UniqueName, $Version); [AlmExportTestCli
         $failureText | Should -Match 'Second failure detail'
     }
 
+    It 'sets the cloned connection as the hook default while later exports are still running' {
+        [AlmExportTestClient]::Reset(2)
+        $hookPath = Join-Path $script:workerRoot 'post-solution.ps1'
+        Set-Content -LiteralPath $hookPath -Value 'param($Context); $query = Invoke-DataverseSQL -Sql ''SELECT 1''; $default = Get-DataverseConnection -GetDefault; [pscustomobject]@{ SolutionName = $Context.SolutionName; ActiveExports = [AlmExportTestClient]::Peak; HasConnection = ($null -ne $Context.Connection); QueryUsedContextConnection = ($query.Connection -eq $Context.Connection); DefaultMatchesContext = ($default -eq $Context.Connection) }'
+        $config = @{
+            solutions = @(@{ name = 'First' }, @{ name = 'Second' })
+            hooks = @{ postExportSolution = $hookPath }
+        }
+        $script:workerState = Start-AlmExportPipeline -Config $config -TempDirectory $script:workerRoot -MaxParallel 2 -BaseDirectory $script:workerRoot
+        Start-AlmQueuedExport -State $script:workerState
+        [AlmExportTestClient]::Started.Wait([TimeSpan]::FromSeconds(10)) | Should -BeTrue
+
+        Add-AlmPostExportSolutionHook -State $script:workerState -SolutionConfig $config.solutions[0] -SolutionIndex 0
+        Complete-AlmPostExportSolutionHook -State $script:workerState
+
+        $result = $script:workerState.SolutionHookResults.First[0]
+        $result.ActiveExports | Should -Be 2
+        $result.HasConnection | Should -BeTrue
+        $result.QueryUsedContextConnection | Should -BeTrue
+        $result.DefaultMatchesContext | Should -BeTrue
+        [AlmExportTestClient]::HookDefaultCleared | Should -BeTrue
+        [AlmExportTestClient]::Release.Set()
+        Wait-AlmSolutionExport -State $script:workerState -SolutionName First | Should -Exist
+        Wait-AlmSolutionExport -State $script:workerState -SolutionName Second | Should -Exist
+    }
+
+    It 'propagates post-solution hook failures' {
+        $hookPath = Join-Path $script:workerRoot 'failing-post-solution.ps1'
+        Set-Content -LiteralPath $hookPath -Value "param(`$Context); throw 'Post-solution hook failed'"
+        $config = @{
+            solutions = @(@{ name = 'First' })
+            hooks = @{ postExportSolution = $hookPath }
+        }
+        $script:workerState = Start-AlmExportPipeline -Config $config -TempDirectory $script:workerRoot -BaseDirectory $script:workerRoot
+        Add-AlmPostExportSolutionHook -State $script:workerState -SolutionConfig $config.solutions[0] -SolutionIndex 0
+        { Complete-AlmPostExportSolutionHook -State $script:workerState } | Should -Throw '*Worker failed*'
+    }
+
     It 'preserves hooks, unchanged versions and summaries with parallel=<Parallel>' -ForEach @(
         @{ Parallel = $false }
         @{ Parallel = $true }
@@ -229,10 +294,30 @@ function Set-DataverseSolution { param($UniqueName, $Version); [AlmExportTestCli
         $staging = Join-Path $script:workerRoot 'staging'
         $temp = Join-Path $script:workerRoot 'temp'
         New-Item -ItemType Directory -Path "$source/hooks", $staging, $temp -Force | Out-Null
-        Set-Content "$source/alm-config.psd1" -Value "@{ solutions = @(@{ name = 'First' }, @{ name = 'Second' }); export = @{ parallel = `$$Parallel }; hooks = @{ preExport = 'hooks/pre.ps1'; postExport = 'hooks/post.ps1' } }"
-        foreach ($phase in @('pre', 'post')) {
-            Set-Content "$source/hooks/$phase.ps1" -Value "param(`$Context) Add-Content (Join-Path `$Context.SourceDirectory 'hook-order.log') '$phase'"
-        }
+        $preSolutionPath = Join-Path $source 'hooks/pre-solution.ps1'
+        $postSolutionPath = Join-Path $source 'hooks/post-solution.ps1'
+        Set-Content "$source/hooks/pre.ps1" -Value "param(`$Context) Add-Content (Join-Path `$Context.SourceDirectory 'hook-order.log') 'pre'"
+        Set-Content "$source/hooks/pre-solution.ps1" -Value @'
+param($Context)
+if ($null -eq $Context.Connection) { throw 'Missing per-solution connection.' }
+Add-Content (Join-Path $Context.SourceDirectory 'hook-order.log') "preSolution-$($Context.SolutionName)"
+'@
+        Set-Content "$source/hooks/post-solution.ps1" -Value @'
+param($Context)
+if ($null -eq $Context.Connection) { throw 'Missing per-solution connection.' }
+[pscustomobject]@{ SolutionName = $Context.SolutionName; SolutionIndex = $Context.SolutionIndex }
+'@
+        Set-Content "$source/hooks/post.ps1" -Value @'
+param($Context)
+Add-Content (Join-Path $Context.SourceDirectory 'hook-order.log') 'post'
+$summary = foreach ($name in ($Context.SolutionHookResults.Keys | Sort-Object)) {
+    "${name}:$($Context.SolutionHookResults[$name][0].SolutionIndex)"
+}
+Set-Content (Join-Path $Context.SourceDirectory 'solution-hook-results.log') $summary
+'@
+        $preSolutionLiteral = "'" + $preSolutionPath.Replace("'", "''") + "'"
+        $postSolutionLiteral = "'" + $postSolutionPath.Replace("'", "''") + "'"
+        Set-Content "$source/alm-config.psd1" -Value "@{ solutions = @(@{ name = 'First' }, @{ name = 'Second' }); export = @{ parallel = `$$Parallel }; hooks = @{ preExport = 'hooks/pre.ps1'; preExportSolution = @($preSolutionLiteral); postExportSolution = @($postSolutionLiteral); postExport = 'hooks/post.ps1' } }"
         foreach ($name in @('First', 'Second')) { Write-TestSolution "$source/solutions/$name" }
         Invoke-CheckedNativeCommand -Command git -Arguments @('-C', $source, 'init', '--quiet')
         Invoke-CheckedNativeCommand -Command git -Arguments @('-C', $source, 'add', '.')
@@ -245,7 +330,8 @@ function Set-DataverseSolution { param($UniqueName, $Version); [AlmExportTestCli
         $result.Parallel | Should -Be $Parallel
         $result.TotalSeconds | Should -BeGreaterOrEqual 0
         [AlmExportTestClient]::VersionUpdates | Should -Be 0
-        @(Get-Content "$source/hook-order.log") | Should -Be @('pre', 'post')
+        @(Get-Content "$source/hook-order.log") | Should -Be @('pre', 'preSolution-First', 'preSolution-Second', 'post')
+        @(Get-Content "$source/solution-hook-results.log") | Should -Be @('First:0', 'Second:1')
         $summary = @(Get-Content "$staging/export-logs/summary.json" -Raw | ConvertFrom-Json)
         $summary.Count | Should -Be 2
         @($summary | Where-Object RunStatus -ne 'Succeeded').Count | Should -Be 0

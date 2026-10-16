@@ -1,6 +1,24 @@
+<#
+.SYNOPSIS
+    Defines the shared in-process export scheduler and logging helpers.
+.DESCRIPTION
+    Dot-source this file; it does not start workers. State returned by
+    Start-AlmExportPipeline owns jobs, cloned clients, synchronization handles and
+    a working directory and must be released with Stop-AlmExportPipeline in finally.
+#>
 . "$PSScriptRoot/../../ttec-digital/common/validation-workers.ps1"
+Set-Alias -Name Send-AlmExportEvent -Value Send-AlmWorkerEvent -Force
 
 function Get-AlmExportSetting {
+    <#
+    .SYNOPSIS
+        Validates export settings while preserving explicit sequential opt-out.
+    .DESCRIPTION
+        Defaults: parallel=true, maxParallel=2 package workers,
+        maxConcurrentOperations=4 Dataverse operation slots. Null/empty strings
+        retain defaults; parallel must be Boolean and both limits integers 1-8,
+        even when parallel is false. Returns a new hashtable or throws.
+    #>
     [OutputType([hashtable])]
     param([Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$Config)
 
@@ -43,21 +61,43 @@ function Test-AlmEarlyExportValidation {
 }
 
 function Expand-AlmExportSolution {
+    # The SDK locates the managed companion beside the unmanaged ZIP returned by
+    # Wait-AlmSolutionExport; both exports must finish before unpacking Both.
+    # MappingFile redirects unpacked components; blank preserves the ordinary layout.
     param(
         [Parameter(Mandatory)][string]$ZipPath,
-        [Parameter(Mandatory)][string]$OutputPath
+        [Parameter(Mandatory)][string]$OutputPath,
+        [string]$MappingFile
     )
 
-    Expand-DataverseSolutionFile -Path $ZipPath -OutputPath $OutputPath -PackageType Both -UnpackMsapp
+    if ([string]::IsNullOrWhiteSpace($MappingFile)) {
+        Expand-DataverseSolutionFile -Path $ZipPath -OutputPath $OutputPath -PackageType Both -UnpackMsapp
+    } else {
+        Expand-DataverseSolutionFile -Path $ZipPath -OutputPath $OutputPath -PackageType Both -UnpackMsapp -MappingFile $MappingFile
+    }
 }
 
 function Start-AlmExportPipeline {
+    <#
+    .SYNOPSIS
+        Allocates scheduler state and queues managed/unmanaged packages per solution.
+    .DESCRIPTION
+        Requires a loaded Dataverse module, a default cloneable connection and
+        Start-ThreadJob. Duplicate names (case-insensitive) or missing cloning throw.
+        Creates a unique directory beneath TempDirectory but does not launch jobs.
+        Returns mutable state for the queue/wait/stop helpers; declined ShouldProcess
+        returns nothing. The borrowed default connection is not owned by the state.
+    .PARAMETER MaxParallel
+        Maximum active package workers, separately bounded by operation slots from Config.
+    #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     [OutputType([hashtable])]
     param(
         [Parameter(Mandatory)][hashtable]$Config,
         [Parameter(Mandatory)][string]$TempDirectory,
-        [ValidateRange(1, 8)][int]$MaxParallel = 2
+        [ValidateRange(1, 8)][int]$MaxParallel = 2,
+        [string]$BaseDirectory = '',
+        [hashtable]$AdditionalHookContext = @{}
     )
 
     if (-not $PSCmdlet.ShouldProcess($TempDirectory, 'Initialize parallel export workers')) { return }
@@ -71,6 +111,8 @@ function Start-AlmExportPipeline {
     if (-not $cloneMethod) {
         throw 'Connection cloning is unavailable. Set export.parallel = $false to use sequential processing.'
     }
+    # Populate details on the original client before cloning so workers do not
+    # independently refresh partially initialized organization metadata.
     $null = $connection.OrganizationDetail
     Get-Command Start-ThreadJob -ErrorAction Stop | Out-Null
     $validateEarly = Test-AlmEarlyExportValidation -Config $Config
@@ -78,12 +120,20 @@ function Start-AlmExportPipeline {
     $workDirectory = Join-Path $TempDirectory ('export-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
     $state = @{
+        Config = $Config
+        BaseDirectory = $BaseDirectory
+        AdditionalHookContext = $AdditionalHookContext
         PendingExports = [System.Collections.Generic.Queue[object]]::new()
         ActiveExports = [System.Collections.Generic.List[object]]::new()
         PendingValidations = [System.Collections.Generic.Queue[object]]::new()
         ActiveValidation = $null
         CompletedExports = @{}
         ValidationResults = @{}
+        PreparedSolutions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        PendingSolutionHooks = [System.Collections.Generic.Queue[object]]::new()
+        ActiveSolutionHooks = [System.Collections.Generic.List[object]]::new()
+        SolutionHookResults = @{}
+        SolutionIndexes = @{}
         Jobs = [System.Collections.Generic.List[object]]::new()
         Clients = [System.Collections.Generic.List[object]]::new()
         Timings = [System.Collections.Generic.List[object]]::new()
@@ -92,6 +142,7 @@ function Start-AlmExportPipeline {
         ModulePath = (Get-Module Rnwood.Dataverse.Data.PowerShell | Select-Object -First 1).Path
         HelpersPath = $PSCommandPath
         ValidationRoot = (Join-Path $PSScriptRoot '../../ttec-digital/common')
+        CommonPath = Join-Path $PSScriptRoot 'common.ps1'
         WorkDirectory = $workDirectory
         MaxParallel = $MaxParallel
         ValidateEarly = $validateEarly
@@ -104,12 +155,16 @@ function Start-AlmExportPipeline {
         }
         LogDirectory = ''
     }
-    foreach ($solution in $Config.solutions) {
+    for ($solutionIndex = 0; $solutionIndex -lt $Config.solutions.Count; $solutionIndex++) {
+        $solution = $Config.solutions[$solutionIndex]
         $state.CompletedExports[$solution.name] = @{}
+        $state.SolutionIndexes[$solution.name] = $solutionIndex
         foreach ($managed in @($false, $true)) {
             $suffix = if ($managed) { '_managed' } else { '' }
             $state.PendingExports.Enqueue(@{
                 SolutionName = $solution.name
+                SolutionConfig = $solution
+                SolutionIndex = $solutionIndex
                 Managed = $managed
                 Path = (Join-Path $workDirectory "$($solution.name)$suffix.zip")
             })
@@ -119,6 +174,16 @@ function Start-AlmExportPipeline {
 }
 
 function Start-AlmQueuedExport {
+    <#
+    .SYNOPSIS
+        Fills free worker slots from PendingExports, mutating the shared state.
+    .DESCRIPTION
+        Clones one client per package. ArgumentList passes live client, semaphore,
+        cancellation and event references to thread jobs rather than serialized
+        process-job copies. Declined ShouldProcess leaves the queue untouched.
+        Worker output contains one Kind=Export completion record plus diagnostics.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseUsingScopeModifierInNewRunspaces', '', Justification = 'The worker explicitly binds its parameters through Start-ThreadJob ArgumentList, preserving shared client and semaphore references.')]
     [CmdletBinding(SupportsShouldProcess = $true)]
     param([Parameter(Mandatory)][hashtable]$State)
 
@@ -127,6 +192,26 @@ function Start-AlmQueuedExport {
 
     while ($State.PendingExports.Count -and $State.ActiveExports.Count -lt $State.MaxParallel) {
         $task = $State.PendingExports.Dequeue()
+        if ($State.PreparedSolutions.Add($task.SolutionName)) {
+            $hookContext = @{}
+            foreach ($key in $State.AdditionalHookContext.Keys) { $hookContext[$key] = $State.AdditionalHookContext[$key] }
+            $hookContext.SolutionName = $task.SolutionName
+            $hookContext.SolutionConfig = $task.SolutionConfig
+            $hookContext.SolutionIndex = $task.SolutionIndex
+            $hasPreExportSolutionHooks = $State.Config.ContainsKey('hooks') -and
+                $State.Config['hooks'] -is [hashtable] -and
+                $State.Config['hooks'].ContainsKey('preExportSolution') -and
+                $State.Config['hooks']['preExportSolution']
+            if ($hasPreExportSolutionHooks) {
+                $hookClient = $State.CloneMethod.Invoke($State.Connection, [object[]]@($null))
+                if ($null -eq $hookClient) { throw "[$($task.SolutionName)][preExportSolution] Connection cloning returned no client." }
+                $State.Clients.Add($hookClient)
+                $hookContext.Connection = $hookClient
+                $hookContext.OperationBudget = $State.OperationBudget
+                $hookContext.CancellationToken = $State.Cancellation.Token
+                $null = Invoke-Hook -HookType preExportSolution -BaseDirectory $State.BaseDirectory -Config $State.Config -AdditionalContext $hookContext -LogContext:$false
+            }
+        }
         $client = $State.CloneMethod.Invoke($State.Connection, [object[]]@($null))
         if ($null -eq $client) { throw "[$($task.SolutionName)][Export] Connection cloning returned no client." }
         $State.Clients.Add($client)
@@ -138,6 +223,8 @@ function Start-AlmQueuedExport {
             Import-Module $ModulePath
             . $LogHelpers
             $phase = if ($Task.Managed) { 'Export:Managed' } else { 'Export:Unmanaged' }
+            # Cancellation can fail the wait before ownership is acquired; only
+            # release a slot actually held, including when export itself throws.
             $acquired = $false
             try {
                 $Budget.Wait($Cancellation)
@@ -223,6 +310,16 @@ function Update-AlmExportValidation {
 }
 
 function Receive-AlmExportJob {
+    <#
+    .SYNOPSIS
+        Drains a terminal worker's streams, logs details and returns its completion record.
+    .DESCRIPTION
+        Job must carry AlmSolutionName/AlmPhase. Writes an optional per-worker log
+        and host diagnostics, filtering nested group markers. Throws unless the job
+        completed with exactly one Kind-bearing record and no ErrorRecord, even if
+        other output appears successful. Does not remove the job or dispose its client.
+    #>
+    [OutputType([pscustomobject])]
     param([Parameter(Mandatory)]$Job, [string]$LogDirectory = '')
 
     $solutionName = if ($Job.PSObject.Properties['AlmSolutionName']) { $Job.AlmSolutionName } else { 'Worker' }
@@ -257,6 +354,8 @@ function Receive-AlmExportJob {
 
 function Write-AlmExportEvent {
     [OutputType([void])]
+    # Drain progress separately from completion records so long-running exports
+    # remain visible while Receive-AlmExportJob waits until a worker is terminal.
     param([Parameter(Mandatory)][hashtable]$State)
 
     Write-AlmWorkerEvents -Events $State.LogEvents
@@ -273,6 +372,15 @@ function Wait-AlmExportActivity {
 }
 
 function Wait-AlmSolutionExport {
+    <#
+    .SYNOPSIS
+        Advances all queued work until both packages for one configured solution finish.
+    .DESCRIPTION
+        Drains events and terminal jobs for any solution, records timings and starts
+        more queued work while waiting. Returns the unmanaged ZIP path only after
+        its managed companion completes. Worker failure or declined startup with no
+        active jobs throws; callers still own mandatory Stop-AlmExportPipeline cleanup.
+    #>
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][hashtable]$State,
@@ -283,9 +391,17 @@ function Wait-AlmSolutionExport {
     Start-AlmQueuedExport -State $State
     while ($State.CompletedExports[$SolutionName].Count -lt 2) {
         Update-AlmExportValidation -State $State
-        $waitJobs = @($State.ActiveExports.ToArray())
-        if ($null -ne $State.ActiveValidation) { $waitJobs += $State.ActiveValidation }
-        Wait-AlmExportActivity -State $State -Jobs $waitJobs
+        Invoke-AlmPostExportSolutionHookQueue -State $State
+        Write-AlmExportEvent -State $State
+        if ($State.ActiveExports.Count -eq 0) { throw "[$SolutionName][Export] No active export workers; queued exports were not started." }
+        $handles = [System.Threading.WaitHandle[]]@($State.LogEvents.Signal) +
+            [System.Threading.WaitHandle[]]@($State.ActiveExports | ForEach-Object { $_.Finished }) +
+            [System.Threading.WaitHandle[]]@($State.ActiveSolutionHooks | ForEach-Object { $_.Finished })
+        if ($null -ne $State.ActiveValidation) { $handles += $State.ActiveValidation.Finished }
+        [System.Threading.WaitHandle]::WaitAny($handles) | Out-Null
+        Update-AlmExportValidation -State $State
+        Invoke-AlmPostExportSolutionHookQueue -State $State
+        Write-AlmExportEvent -State $State
         foreach ($job in @($State.ActiveExports.ToArray())) {
             if ($job.State -in @('Completed', 'Failed', 'Stopped')) {
                 $result = Receive-AlmExportJob -Job $job -LogDirectory $State.LogDirectory
@@ -337,7 +453,150 @@ function Complete-AlmExportValidation {
     Write-AlmExportEvents -State $State
 }
 
+function Invoke-AlmQueuedPostExportSolutionHook {
+    <#
+    .SYNOPSIS
+        Starts queued post-export solution hooks in background workers.
+    .DESCRIPTION
+        Each hook runs in an isolated thread-job runspace and receives its cloned
+        Dataverse connection as Context.Connection. The worker sets that client
+        as the runspace's default so existing Dataverse commands use the clone.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseUsingScopeModifierInNewRunspaces', '', Justification = 'The worker receives the hook context and cloned Dataverse client explicitly through Start-ThreadJob ArgumentList.')]
+    param([Parameter(Mandatory)][hashtable]$State)
+
+    while ($State.PendingSolutionHooks.Count -and $State.ActiveSolutionHooks.Count -lt $State.MaxParallel) {
+        $task = $State.PendingSolutionHooks.Dequeue()
+        $client = $State.CloneMethod.Invoke($State.Connection, [object[]]@($null))
+        if ($null -eq $client) { throw "[$($task.SolutionName)][postExportSolution] Connection cloning returned no client." }
+        $State.Clients.Add($client)
+        $additionalContext = @{}
+        foreach ($key in $task.AdditionalContext.Keys) { $additionalContext[$key] = $task.AdditionalContext[$key] }
+        $additionalContext.Connection = $client
+        $additionalContext.OperationBudget = $State.OperationBudget
+        $additionalContext.CancellationToken = $State.Cancellation.Token
+        $task.AdditionalContext = $additionalContext
+        $job = Start-ThreadJob -ThrottleLimit 32 -ArgumentList @(
+            $State.ModulePath, $State.HelpersPath, $State.CommonPath, $task, $State.LogEvents
+        ) -ScriptBlock {
+            param($ModulePath, $HelpersPath, $CommonPath, $Task, $Events)
+            $ErrorActionPreference = 'Stop'
+            $ProgressPreference = 'SilentlyContinue'
+            $started = [datetime]::UtcNow
+            $phase = 'postExportSolution'
+            try {
+                Import-Module $ModulePath -ErrorAction Stop
+                . $HelpersPath
+                . $CommonPath
+                Set-DataverseConnectionAsDefault -Connection $Task.AdditionalContext.Connection
+                try {
+                    Send-AlmExportEvent -Events $Events -SolutionName $Task.SolutionName -Phase $phase -Message 'Started'
+                    $results = @(Invoke-Hook -HookType postExportSolution -BaseDirectory $Task.BaseDirectory -Config $Task.Config -AdditionalContext $Task.AdditionalContext -LogContext:$false)
+                    Send-AlmExportEvent -Events $Events -SolutionName $Task.SolutionName -Phase $phase -Message "Completed in $([math]::Round(([datetime]::UtcNow-$started).TotalSeconds,2))s"
+                } finally {
+                    Set-DataverseConnectionAsDefault -Clear
+                }
+                [pscustomobject]@{ Kind = 'SolutionHook'; SolutionName = $Task.SolutionName; Results = $results; Started = $started; Finished = [datetime]::UtcNow }
+            } catch {
+                Send-AlmExportEvent -Events $Events -SolutionName $Task.SolutionName -Phase $phase -Message "Failed: $(($_ | Out-String).TrimEnd())"
+                throw
+            }
+        }
+        $job | Add-Member -NotePropertyName AlmSolutionName -NotePropertyValue $task.SolutionName
+        $job | Add-Member -NotePropertyName AlmPhase -NotePropertyValue 'postExportSolution'
+        $State.Jobs.Add($job)
+        $State.ActiveSolutionHooks.Add($job)
+    }
+}
+
+function Add-AlmPostExportSolutionHook {
+    <#
+    .SYNOPSIS
+        Queues the post-export hook for a solution after unpack and comparison.
+    .DESCRIPTION
+        Copies the export context, adds solution-specific values and schedules
+        the hook without waiting for other exports to finish.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][hashtable]$SolutionConfig,
+        [Parameter(Mandatory)][int]$SolutionIndex
+    )
+
+    $hasHooks = $State.Config.ContainsKey('hooks') -and
+        $State.Config['hooks'] -is [hashtable] -and
+        $State.Config['hooks'].ContainsKey('postExportSolution') -and
+        $State.Config['hooks']['postExportSolution']
+    if (-not $hasHooks) { return }
+    $additionalContext = @{}
+    foreach ($key in $State.AdditionalHookContext.Keys) { $additionalContext[$key] = $State.AdditionalHookContext[$key] }
+    $additionalContext.SolutionName = $SolutionConfig.name
+    $additionalContext.SolutionConfig = $SolutionConfig
+    $additionalContext.SolutionIndex = $SolutionIndex
+    $State.PendingSolutionHooks.Enqueue(@{
+        SolutionName = $SolutionConfig.name
+        SolutionIndex = $SolutionIndex
+        SolutionConfig = $SolutionConfig
+        Config = $State.Config
+        BaseDirectory = $State.BaseDirectory
+        AdditionalContext = $additionalContext
+    })
+    Invoke-AlmPostExportSolutionHookQueue -State $State
+}
+
+function Invoke-AlmPostExportSolutionHookQueue {
+    <#
+    .SYNOPSIS
+        Collects completed solution hooks and starts queued hooks.
+    .DESCRIPTION
+        Stores each hook's results by solution name, surfaces worker failures and
+        fills available parallel slots from the pending queue.
+    #>
+    param([Parameter(Mandatory)][hashtable]$State)
+
+    foreach ($job in @($State.ActiveSolutionHooks.ToArray())) {
+        if ($job.State -in @('Completed', 'Failed', 'Stopped')) {
+            $result = Receive-AlmExportJob -Job $job -LogDirectory $State.LogDirectory
+            if ($result.Kind -ne 'SolutionHook') { throw "[$($job.AlmSolutionName)][postExportSolution] Unexpected worker result '$($result.Kind)'." }
+            $State.SolutionHookResults[$result.SolutionName] = @($result.Results)
+            $State.ActiveSolutionHooks.Remove($job) | Out-Null
+        }
+    }
+    Invoke-AlmQueuedPostExportSolutionHook -State $State
+}
+
+function Complete-AlmPostExportSolutionHook {
+    <#
+    .SYNOPSIS
+        Waits for all queued post-export solution hooks to finish.
+    .DESCRIPTION
+        Continues draining hook events and completion records until no pending
+        or active hooks remain, before the global postExport hook runs.
+    #>
+    param([Parameter(Mandatory)][hashtable]$State)
+
+    while ($State.PendingSolutionHooks.Count -or $State.ActiveSolutionHooks.Count) {
+        Invoke-AlmPostExportSolutionHookQueue -State $State
+        if ($State.ActiveSolutionHooks.Count) {
+            $handles = [System.Threading.WaitHandle[]]@($State.LogEvents.Signal) +
+                [System.Threading.WaitHandle[]]@($State.ActiveSolutionHooks | ForEach-Object { $_.Finished })
+            [System.Threading.WaitHandle]::WaitAny($handles) | Out-Null
+        }
+        Write-AlmExportEvent -State $State
+    }
+}
+
 function Stop-AlmExportPipeline {
+    <#
+    .SYNOPSIS
+        Cancels and releases an owned scheduler, including after failure.
+    .DESCRIPTION
+        Stops/removes jobs, drains remaining logs, disposes cloned clients and
+        synchronization handles and deletes WorkDirectory, but not the default
+        connection or external LogDirectory. Intended for one finally call per
+        initialized state, not repeated disposal. Cleanup bypasses ambient WhatIf.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Mandatory teardown cancels owned jobs and releases clients, synchronization handles and temporary files; prompting must not strand resources after an export failure.')]
     param([Parameter(Mandatory)][hashtable]$State)
 
     $State.Cancellation.Cancel()

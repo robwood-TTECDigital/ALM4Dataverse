@@ -6,7 +6,154 @@
     such as build.ps1, deploy.ps1, and export.ps1.
 #>
 
+function Get-SolutionPackagerMappingEntry {
+    <#
+    .SYNOPSIS
+        Validates inline solution mappings and returns ordered normalized entries.
+    .DESCRIPTION
+        Missing/null mappings emits no entries. Otherwise requires an array of
+        hashtables with Folder, FileToFile or FileToPath type and nonblank source/
+        destination strings; unknown mapping/build-command keys throw. Rejects the
+        removed mappingFile and solution-level buildCommands keys even if empty.
+        Normalizes type casing and returns Type, Source, Destination and BuildCommand.
+        BuildCommand is the original optional hashtable, not a copy: its executable,
+        argument and working-directory values are validated later by the build planner.
+        This helper neither resolves paths nor executes commands.
+    #>
+    [OutputType([object[]])]
+    param([Parameter(Mandatory)][hashtable]$Solution)
+
+    $solutionName = [string]$Solution.name
+    if ($Solution.ContainsKey('mappingFile')) {
+        throw "mappingFile for solution '$solutionName' is no longer supported. Define mappings directly in the solution configuration."
+    }
+    if ($Solution.ContainsKey('buildCommands')) {
+        throw "buildCommands for solution '$solutionName' are no longer supported as a separate setting. Put buildCommand on each mapping entry instead."
+    }
+    if (-not $Solution.ContainsKey('mappings') -or $null -eq $Solution.mappings) {
+        return @()
+    }
+    if ($Solution.mappings -isnot [array]) {
+        throw "mappings for solution '$solutionName' must be an array of mapping entries."
+    }
+
+    $entries = [System.Collections.Generic.List[object]]::new()
+    foreach ($mapping in $Solution.mappings) {
+        if ($mapping -isnot [hashtable]) {
+            throw "Each mappings entry for solution '$solutionName' must be a hashtable."
+        }
+
+        $unknownProperties = @($mapping.Keys | Where-Object { $_ -notin @('type', 'source', 'destination', 'buildCommand') })
+        if ($unknownProperties.Count -gt 0) {
+            throw "Unknown property in mappings entry for solution '$solutionName': $($unknownProperties -join ', ')."
+        }
+        if ($mapping.type -isnot [string] -or [string]::IsNullOrWhiteSpace($mapping.type)) {
+            throw "Each mappings entry for solution '$solutionName' must have a type of Folder, FileToFile, or FileToPath."
+        }
+        $type = switch ($mapping.type.ToLowerInvariant()) {
+            'folder' { 'Folder' }
+            'filetofile' { 'FileToFile' }
+            'filetopath' { 'FileToPath' }
+            default { throw "Unsupported mappings type '$($mapping.type)' for solution '$solutionName'. Use Folder, FileToFile, or FileToPath." }
+        }
+        foreach ($propertyName in @('source', 'destination')) {
+            if (-not $mapping.ContainsKey($propertyName) -or $mapping[$propertyName] -isnot [string] -or [string]::IsNullOrWhiteSpace($mapping[$propertyName])) {
+                throw "Each mappings entry for solution '$solutionName' must have a non-empty $propertyName string."
+            }
+        }
+        if ($mapping.ContainsKey('buildCommand') -and $null -ne $mapping.buildCommand) {
+            if ($mapping.buildCommand -isnot [hashtable]) {
+                throw "buildCommand for a mappings entry in solution '$solutionName' must be a hashtable."
+            }
+            $unknownBuildCommandProperties = @($mapping.buildCommand.Keys | Where-Object { $_ -notin @('name', 'executable', 'arguments', 'workingDirectory', 'parallel') })
+            if ($unknownBuildCommandProperties.Count -gt 0) {
+                throw "Unknown property in buildCommand for solution '$solutionName': $($unknownBuildCommandProperties -join ', ')."
+            }
+        }
+
+        $entries.Add([pscustomobject]@{
+            Type         = $type
+            Source       = $mapping.source
+            Destination  = $mapping.destination
+            BuildCommand = if ($mapping.ContainsKey('buildCommand')) { $mapping.buildCommand } else { $null }
+        })
+    }
+
+    return $entries.ToArray()
+}
+
+function ConvertTo-SolutionPackagerMappingXml {
+    <#
+    .SYNOPSIS
+        Serializes normalized entries to SolutionPackager mapping XML without writing a file.
+    .DESCRIPTION
+        Expects Get-SolutionPackagerMappingEntry output. Source is the external path
+        written as 'to'; Destination is the solution-tree path written as 'map'.
+        Relative sources resolve under SourceDirectory and ordinary relative
+        destinations under SolutionPath, preserving entry order and XML escaping.
+        Paths containing %NAME% are left for the packager to expand, without source
+        existence checks. Rooted destinations are preserved.
+    .PARAMETER AllowMissingSource
+        Skips ordinary source existence checks for export, where unpacking can create
+        them. Otherwise FileToFile needs a file and Folder/FileToPath need a directory.
+        Validation throws before returning XML; no buildCommand is run here.
+    #>
+    param(
+        [Parameter(Mandatory)][object[]]$Entries,
+        [Parameter(Mandatory)][string]$SourceDirectory,
+        [Parameter(Mandatory)][string]$SolutionPath,
+        [Parameter(Mandatory)][string]$SolutionName,
+        [switch]$AllowMissingSource
+    )
+
+    $document = [System.Xml.XmlDocument]::new()
+    $declaration = $document.CreateXmlDeclaration('1.0', 'utf-8', $null)
+    [void]$document.AppendChild($declaration)
+    $root = $document.CreateElement('Mappings')
+    [void]$document.AppendChild($root)
+
+    foreach ($entry in $Entries) {
+        # Packager environment placeholders must survive serialization; resolving them
+        # here would change the mapping contract and prematurely require export targets.
+        $sourcePath = [string]$entry.Source
+        if ($sourcePath -notmatch '%[^%]+%') {
+            if (-not [System.IO.Path]::IsPathRooted($sourcePath)) {
+                $sourcePath = Join-Path $SourceDirectory $sourcePath
+            }
+            $sourcePath = [System.IO.Path]::GetFullPath($sourcePath)
+            if (-not $AllowMissingSource) {
+                $expectedPathType = if ($entry.Type -eq 'FileToFile') { 'Leaf' } else { 'Container' }
+                if (-not (Test-Path -LiteralPath $sourcePath -PathType $expectedPathType)) {
+                    $expectedDescription = if ($expectedPathType -eq 'Leaf') { 'file' } else { 'folder' }
+                    throw "Mapping source $expectedDescription not found for solution '$SolutionName': $sourcePath"
+                }
+            }
+        }
+
+        $destination = [string]$entry.Destination
+        if (-not [System.IO.Path]::IsPathRooted($destination) -and $destination -notmatch '%[^%]+%') {
+        $destination = Join-Path $SolutionPath ($destination.Replace('\', [string][System.IO.Path]::DirectorySeparatorChar))
+        }
+
+        $element = $document.CreateElement([string]$entry.Type)
+        $element.SetAttribute('map', $destination)
+        $element.SetAttribute('to', $sourcePath)
+        [void]$root.AppendChild($element)
+    }
+
+    return $document.OuterXml
+}
+
 function Invoke-CheckedNativeCommand {
+    <#
+    .SYNOPSIS
+        Captures native stdout/stderr as strings and rejects nonzero exit codes.
+    .PARAMETER AllowFailure
+        Returns captured output even on failure; the caller must interpret LASTEXITCODE.
+    .NOTES
+        Temporarily relaxes ErrorActionPreference so native stderr can be captured,
+        then restores the caller's preference even if invocation throws.
+    #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -34,6 +181,14 @@ function Invoke-CheckedNativeCommand {
 }
 
 function Merge-AlmConfigValue {
+    <#
+    .SYNOPSIS
+        Recursively merges configuration without treating false or zero as missing.
+    .DESCRIPTION
+        Null on either side selects the other value. Two arrays concatenate defaults
+        first; two hashtables merge by key into a new table. All other pairs select
+        the override, including empty strings and mismatched types.
+    #>
     param(
         $DefaultValue,
         $OverrideValue
@@ -64,6 +219,18 @@ function Merge-AlmConfigValue {
 }
 
 function Get-AlmConfig {
+    <#
+    .SYNOPSIS
+        Loads required repository configuration over the bundled defaults.
+    .PARAMETER BaseDirectory
+        Directory containing alm-config.psd1; absence of that file is an error.
+    .PARAMETER LogConfig
+        Writes the complete merged configuration to host diagnostics when true.
+        Disable when configuration or hook context may contain sensitive values.
+    .OUTPUTS
+        Hashtable with merged keys plus _main and _defaults holding the imported
+        tables before merging. Relative configuration paths are not rebased here.
+    #>
     param(
         [string]$BaseDirectory = ".",
         [bool]$LogConfig = $true
@@ -112,6 +279,18 @@ function Get-AlmConfig {
 }
 
 function Resolve-AlmBranchBaseVersion {
+    <#
+    .SYNOPSIS
+        Resolves a branch's configured MAJOR.MINOR without changing configuration.
+    .DESCRIPTION
+        Accepts a short branch name or refs/heads ref, rejecting other refs.
+        Overrides match the full branch name case-sensitively; otherwise default
+        is used. Invalid SemVer integers or Int32 overflow throw.
+    .OUTPUTS
+        Object with Major, Build, MajorMinor, BranchName and HasBranchOverride.
+        Build deliberately holds the second configured component for Dataverse's
+        Major.Minor.Build.Revision layout, not its mutable Minor counter.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -179,6 +358,14 @@ function Resolve-AlmBranchBaseVersion {
 }
 
 function Invoke-AlmGitCommand {
+    <#
+    .SYNOPSIS
+        Runs Git in a repository and returns ExitCode and combined Output text.
+    .DESCRIPTION
+        Missing Git throws; a nonzero Git exit code is returned rather than thrown
+        so reservation callers can distinguish missing refs from command failures.
+        Restores ErrorActionPreference after capturing stderr.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -209,6 +396,14 @@ function Invoke-AlmGitCommand {
 }
 
 function Resolve-AlmDefaultBranchName {
+    <#
+    .SYNOPSIS
+        Uses an explicit branch or queries origin's symbolic HEAD.
+    .DESCRIPTION
+        Strips refs/heads from explicit names and rejects other refs. Without an
+        override, requires remote access and throws on lookup or parsing failure;
+        it does not rely on a potentially stale local origin/HEAD.
+    #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -243,6 +438,13 @@ function Resolve-AlmDefaultBranchName {
 }
 
 function Get-NextAlmSolutionVersion {
+    <#
+    .SYNOPSIS
+        Advances a four-part Dataverse version while preserving Major and Build.
+    .PARAMETER IsAdditive
+        True increments Revision; false increments Minor and resets Revision.
+        Incrementing a component beyond Int32.MaxValue throws.
+    #>
     [CmdletBinding()]
     [OutputType([version])]
     param(
@@ -273,6 +475,18 @@ function Get-NextAlmSolutionVersion {
 }
 
 function Register-AlmSolutionVersion {
+    <#
+    .SYNOPSIS
+        Reserves a solution version by pushing a unique lightweight tag to origin.
+    .DESCRIPTION
+        Tags point to local HEAD. Existing remote reservations advance the candidate
+        using IsAdditive; success returns the reserved Version and keeps its local
+        tag. A local-only collision, non-race push failure or exhausted attempts
+        throws. This reserves the number before export updates Dataverse; it is not
+        a transaction with the later environment update.
+    .PARAMETER MaximumAttempts
+        Maximum candidate attempts (1-1000), including remote collisions.
+    #>
     [CmdletBinding()]
     [OutputType([version])]
     param(
@@ -330,6 +544,8 @@ function Register-AlmSolutionVersion {
             return $candidateVersion
         }
 
+        # A rejected push is a race only if the remote now owns the reservation.
+        # Remove our local attempt before retrying; do not hide authentication or transport errors.
         $deleteTag = Invoke-AlmGitCommand -RepositoryPath $RepositoryPath -Arguments @('tag', '-d', $tagName)
         if ($deleteTag.ExitCode -ne 0) {
             throw "Failed to remove local reservation tag '$tagName' after a rejected push. Push output: $($pushTag.Output). Cleanup output: $($deleteTag.Output)"
@@ -352,6 +568,17 @@ function Register-AlmSolutionVersion {
 }
 
 function Resolve-AlmBuildVersion {
+    <#
+    .SYNOPSIS
+        Builds branch-suffixed SemVer and tag metadata from a CI run number.
+    .DESCRIPTION
+        Uses configured MAJOR.MINOR and a non-negative, unpadded numeric PATCH.
+        The branch is lowercased and sanitized for prerelease syntax; the original
+        normalized branch name is retained for identity comparisons. Invalid input
+        throws. Provider labels the output and does not alter version arithmetic.
+    .OUTPUTS
+        Object with Version, TagName, BranchName, Provider and RunNumber.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -397,6 +624,14 @@ function Resolve-AlmBuildVersion {
 }
 
 function Write-AlmBuildVersionInfo {
+    <#
+    .SYNOPSIS
+        Overwrites build-version.json in an existing artifacts directory.
+    .DESCRIPTION
+        Consumes Resolve-AlmBuildVersion's result and returns the metadata path.
+        Requires a numeric RunId and full 40-hex SourceCommit, stored lowercase;
+        invalid identity or a missing artifacts directory throws before writing.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -437,6 +672,16 @@ function Write-AlmBuildVersionInfo {
 }
 
     function Initialize-PacAuthentication {
+        <#
+        .SYNOPSIS
+            Creates or selects a PAC profile using the existing Azure identity context.
+        .DESCRIPTION
+            Requires PAC on PATH and a non-interactive Azure sign-in context.
+            If profile creation fails, tries selection before validating auth who.
+            Throws when neither setup path succeeds or identity validation fails.
+        .PARAMETER Quiet
+            Suppresses auth who output, not group markers or authentication errors.
+        #>
         param(
             [string]$ProfileName = 'ALM4Dataverse-SolutionCheck',
             [switch]$Quiet
@@ -489,6 +734,18 @@ function Write-AlmBuildVersionInfo {
     }
 
 function Invoke-Hook {
+    <#
+    .SYNOPSIS
+        Invokes a configured hook path or ordered list with a Context hashtable.
+    .DESCRIPTION
+        Missing/empty hook configuration is a no-op. Replaces [alm] in each path
+        with this library's repository root; other relative paths use the caller's
+        current location, not BaseDirectory. AdditionalContext overwrites matching
+        standard keys. Hook output flows through and missing scripts or failures
+        stop execution; earlier hook side effects are not rolled back.
+    .PARAMETER LogContext
+        Controls diagnostic serialization of Context; disable for sensitive data.
+    #>
     param(
         [string]$HookType,
         [string]$BaseDirectory,
@@ -506,13 +763,13 @@ function Invoke-Hook {
         foreach ($hook in $hooks) {
             Write-Host "##[group] Executing $HookType hook: $hook"
 
-            # Build context hashtable with required and additional entries
+            # Hooks receive the same configuration object, not an isolated copy.
             $context = @{
                 HookType      = $HookType
                 BaseDirectory = $BaseDirectory
                 Config        = $Config
             }
-            # Add any additional context entries
+            # Caller-supplied keys intentionally take precedence over the standard context.
             foreach ($key in $AdditionalContext.Keys) {
                 $context[$key] = $AdditionalContext[$key]
             }

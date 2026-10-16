@@ -387,6 +387,9 @@ Describe 'Bounded export scheduling' {
             [pscustomobject]@{}
         }
         $state = @{
+            Config = @{ hooks = @{} }
+            AdditionalHookContext = @{}
+            PreparedSolutions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             PendingExports = [System.Collections.Generic.Queue[object]]::new()
             ActiveExports = [System.Collections.Generic.List[object]]::new()
             PendingValidations = [System.Collections.Generic.Queue[object]]::new()
@@ -415,7 +418,15 @@ Describe 'Bounded export scheduling' {
 
     It 'starts only the configured number of exports and refills a released slot' {
         Mock Start-ThreadJob { [pscustomobject]@{State='Running'} }
-        foreach ($taskIndex in 1..4) { $state.PendingExports.Enqueue(@{SolutionName="Test$taskIndex";Managed=$false;Path='test.zip'}) }
+        foreach ($taskIndex in 1..4) {
+            $state.PendingExports.Enqueue(@{
+                SolutionName = "Test$taskIndex"
+                SolutionConfig = @{ name = "Test$taskIndex" }
+                SolutionIndex = $taskIndex - 1
+                Managed = $false
+                Path = 'test.zip'
+            })
+        }
         Start-AlmQueuedExports -State $state
         $state.ActiveExports.Count | Should -Be 2
         $state.PendingExports.Count | Should -Be 2
