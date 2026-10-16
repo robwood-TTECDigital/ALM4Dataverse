@@ -40,13 +40,6 @@ $ErrorActionPreference = "Stop"
 if (-not (Get-Module -ListAvailable -Name Pester)) {
     throw "Pester module is required. Install it with: Install-Module Pester -Force"
 }
-
-
-# Ensure Pester is available
-if (-not (Get-Module -ListAvailable -Name Pester)) {
-    throw "Pester module is required. Install it with: Install-Module Pester -Force"
-}
-
 #region Test Configuration
 
 # Test data configuration - defines publishers, solutions, and component prefixes
@@ -93,8 +86,6 @@ function Cleanup-TestArtifacts {
         Cleans up solutions, tables, environment variables, and publishers in the correct order
         to avoid dependency issues
     #>
-    
-    Write-Host "`nCleaning up test artifacts..." -ForegroundColor Cyan
     
     Write-Host "`nCleaning up test artifacts..." -ForegroundColor Cyan
     

@@ -63,7 +63,7 @@ gh api repos/ALM4Dataverse/ALM4Dataverse/releases --paginate `
   --jq '.[] | [.tag_name, .name, .html_url, .draft, .prerelease] | @tsv'
 ```
 
-Use every non-draft, non-prerelease GitHub release from the old baseline through the new version, inclusive. If the release name and tag differ, show both, for example `v1.7.0 (tag v1.6.1)`, and link to the tag URL returned by GitHub.
+Use every non-draft, non-prerelease GitHub release strictly newer than the old baseline and no newer than the new version (old baseline exclusive, new version inclusive). Do not include the baseline release itself: it is already incorporated in the target branch. For example, when updating from v1.12.0 to v1.15.0, summarize v1.14.0 and v1.15.0, but not v1.12.0; omit any versions in between that were not published as releases. If the release name and tag differ, show both, for example `v1.7.0 (tag v1.6.1)`, and link to the tag URL returned by GitHub.
 
 ## Branch and Merge Flow
 
@@ -90,13 +90,12 @@ The title uses the actual upstream version transition:
 Update ALM4Dataverse from vX to vY
 ```
 
-The description is a concise release-by-release summary. Do not use a long commit list and do not add a generic paragraph such as `It incorporates upstream improvements`. Include one bullet for every GitHub release in the range, with a release link and a short summary of the changes:
+The description is a concise release-by-release summary. Do not use a long commit list and do not add a generic paragraph such as `It incorporates upstream improvements`. Include one bullet for every GitHub release strictly after the old baseline through the new version, inclusive, with a release link and a short summary of the changes. Never add a bullet for the baseline release because it was already included in the previous update:
 
 ```text
-GitHub release changes from vX to vY:
-- [vX](https://github.com/ALM4Dataverse/ALM4Dataverse/releases/tag/vX): Short summary of this release.
-- [vX.1](https://github.com/ALM4Dataverse/ALM4Dataverse/releases/tag/vX.1): Short summary of this release.
-- [vY](https://github.com/ALM4Dataverse/ALM4Dataverse/releases/tag/vY): Short summary of this release.
+GitHub release changes after v1.12.0 through v1.15.0:
+- [v1.14.0](https://github.com/ALM4Dataverse/ALM4Dataverse/releases/tag/v1.14.0): Adds PowerShell validation, coverage gates, and regression tests to CI.
+- [v1.15.0](https://github.com/ALM4Dataverse/ALM4Dataverse/releases/tag/v1.15.0): Validates GitHub/Azure workflows, parallelizes BUILD, adds SemVer and branch-based solution versions, accepts unprefixed GitHub variables, and avoids deployment-gate tag collisions.
 ```
 
 The description should contain one link for each release, no duplicate endpoint links, and enough detail to distinguish the releases without copying full release notes. Keep it below Azure DevOps' 4,000-character limit.

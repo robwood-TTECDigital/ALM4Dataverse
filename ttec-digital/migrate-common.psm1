@@ -279,6 +279,7 @@ function Invoke-ConfigMigration {
     .OUTPUTS
         Returns a hashtable with migration results including warnings and whether migration occurred.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'WorkspacePath', Justification = 'Retained in the exported migration API for caller compatibility; path resolution is handled by the explicit path parameters.')]
     param(
         [Parameter(Mandatory = $true)]
         [string]$WorkspacePath,

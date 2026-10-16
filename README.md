@@ -75,6 +75,8 @@ and environment-specific values are supplied at runtime.
 - Optional PAC Solution Checker and deployment validation, including a retained release or last-deployed environment baseline.
 - Branch-specific development and promotion workflows, with platform-specific approval, permission, and concurrency controls.
 - GitHub Release assets, ordered manual promotion or environment protection, deployment pointers, and branch-aware Release cleanup.
+- Branch-specific development and deployment workflows, with platform-specific approval, permission, and concurrency controls.
+- Branch-suffixed GitHub BUILD releases, deployment pointers, and branch-aware Release cleanup.
 
 > [!IMPORTANT]
 > ALM4Dataverse does not provision Dataverse environments, replace functional testing,
@@ -154,3 +156,7 @@ extensions, service connections, target settings, and pipeline resource permissi
 - [Frequently asked questions](docs/faqs.md)
 - [Maintainer guide](docs/maintainers.md): tests, dependency updates, and shared releases.
 - [Maintainer scripts and checks](.github/scripts/README.md)
+## Contributing
+
+See [PowerShell Development](docs/development/powershell.md) for local checks,
+regression tests, analyzer policy, and the PowerShell CI workflow.

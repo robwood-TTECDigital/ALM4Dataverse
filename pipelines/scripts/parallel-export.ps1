@@ -1,6 +1,7 @@
 . "$PSScriptRoot/../../ttec-digital/common/validation-workers.ps1"
 
-function Get-AlmExportSettings {
+function Get-AlmExportSetting {
+    [OutputType([hashtable])]
     param([Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$Config)
 
     $settings = @{ parallel = $true; maxParallel = 2; maxConcurrentOperations = 4 }
@@ -28,6 +29,8 @@ function Get-AlmExportSettings {
     return $settings
 }
 
+Set-Alias -Name Get-AlmExportSettings -Value Get-AlmExportSetting -Force
+
 function Test-AlmEarlyExportValidation {
     param([Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$Config)
 
@@ -49,11 +52,15 @@ function Expand-AlmExportSolution {
 }
 
 function Start-AlmExportPipeline {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory)][hashtable]$Config,
         [Parameter(Mandatory)][string]$TempDirectory,
         [ValidateRange(1, 8)][int]$MaxParallel = 2
     )
+
+    if (-not $PSCmdlet.ShouldProcess($TempDirectory, 'Initialize parallel export workers')) { return }
 
     $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($solution in $Config.solutions) {
@@ -67,7 +74,7 @@ function Start-AlmExportPipeline {
     $null = $connection.OrganizationDetail
     Get-Command Start-ThreadJob -ErrorAction Stop | Out-Null
     $validateEarly = Test-AlmEarlyExportValidation -Config $Config
-    $exportSettings = Get-AlmExportSettings -Config $Config
+    $exportSettings = Get-AlmExportSetting -Config $Config
     $workDirectory = Join-Path $TempDirectory ('export-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
     $state = @{
@@ -111,8 +118,12 @@ function Start-AlmExportPipeline {
     return $state
 }
 
-function Start-AlmQueuedExports {
+function Start-AlmQueuedExport {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param([Parameter(Mandatory)][hashtable]$State)
+
+    if (-not $PSCmdlet.ShouldProcess('Pending exports', 'Start parallel workers')) { return }
+    if ($WhatIfPreference) { throw 'No active export workers were started.' }
 
     while ($State.PendingExports.Count -and $State.ActiveExports.Count -lt $State.MaxParallel) {
         $task = $State.PendingExports.Dequeue()
@@ -142,12 +153,15 @@ function Start-AlmQueuedExports {
             }
             [pscustomobject]@{ Kind = 'Export'; SolutionName = $Task.SolutionName; Managed = $Task.Managed; Path = $Task.Path; Started = $started; Finished = [datetime]::UtcNow }
         }
+        if ($null -eq $job) { throw 'No active export workers were started.' }
         $job | Add-Member -NotePropertyName AlmSolutionName -NotePropertyValue $task.SolutionName
         $job | Add-Member -NotePropertyName AlmPhase -NotePropertyValue $(if ($task.Managed) { 'Export:Managed' } else { 'Export:Unmanaged' })
         $State.Jobs.Add($job)
         $State.ActiveExports.Add($job)
     }
 }
+
+Set-Alias -Name Start-AlmQueuedExports -Value Start-AlmQueuedExport -Force
 
 function Update-AlmExportValidation {
     param([Parameter(Mandatory)][hashtable]$State)
@@ -166,6 +180,7 @@ function Update-AlmExportValidation {
             param($ModulePath, $ValidationRoot, $Client, $Task, $Settings, $Budget, $Cancellation, $Events, $LogDirectory)
             $ErrorActionPreference = 'Stop'
             $ProgressPreference = 'SilentlyContinue'
+            if ($null -eq $Client) { throw 'Validation worker received no Dataverse connection.' }
             $started = [datetime]::UtcNow
             Import-Module $ModulePath
             & "$ValidationRoot/load-dataverse-sdk.ps1"
@@ -181,7 +196,7 @@ function Update-AlmExportValidation {
                 param($TableName, $Id, $Columns, $Top)
                 & $recordCommand -Connection $Client @PSBoundParameters
             }
-            function Get-DataverseEntityMetadata {
+            Set-Item -Path Function:\Get-DataverseEntityMetadata -Value {
                 param($EntityName, [switch]$UseMetadataCache, [switch]$ExcludeAttributes, [switch]$ExcludeRelationships, [switch]$ExcludePrivileges)
                 & $metadataCommand -Connection $Client @PSBoundParameters
             }
@@ -189,7 +204,7 @@ function Update-AlmExportValidation {
                 param($Method, $Path)
                 & $requestCommand -Connection $Client @PSBoundParameters
             }
-            function Get-DataverseConnection { param([switch]$GetDefault); return $Client }
+            function Get-DataverseConnection { param([switch]$GetDefault); $null = $GetDefault; return $Client }
             . "$ValidationRoot/solutionvalidation.ps1"
             $ruleTimings = [System.Collections.Generic.List[object]]::new()
             $solutionLogs = if ($LogDirectory) { Join-Path $LogDirectory $Task.SolutionName } else { '' }
@@ -240,11 +255,13 @@ function Receive-AlmExportJob {
     return $result[0]
 }
 
-function Write-AlmExportEvents {
+function Write-AlmExportEvent {
+    [OutputType([void])]
     param([Parameter(Mandatory)][hashtable]$State)
 
     Write-AlmWorkerEvents -Events $State.LogEvents
 }
+Set-Alias -Name Write-AlmExportEvents -Value Write-AlmExportEvent -Force
 
 function Wait-AlmExportActivity {
     param([Parameter(Mandatory)][hashtable]$State, [Parameter(Mandatory)][object[]]$Jobs)
@@ -255,13 +272,15 @@ function Wait-AlmExportActivity {
     Write-AlmExportEvents -State $State
 }
 
-function Wait-AlmSolutionExports {
+function Wait-AlmSolutionExport {
+    [OutputType([string])]
     param(
         [Parameter(Mandatory)][hashtable]$State,
         [Parameter(Mandatory)][string]$SolutionName
     )
 
-    Start-AlmQueuedExports -State $State
+    if ($WhatIfPreference) { throw 'No active export workers were started.' }
+    Start-AlmQueuedExport -State $State
     while ($State.CompletedExports[$SolutionName].Count -lt 2) {
         Update-AlmExportValidation -State $State
         $waitJobs = @($State.ActiveExports.ToArray())
@@ -276,10 +295,11 @@ function Wait-AlmSolutionExports {
                 $State.ActiveExports.Remove($job) | Out-Null
             }
         }
-        Start-AlmQueuedExports -State $State
+        Start-AlmQueuedExport -State $State
     }
     return $State.CompletedExports[$SolutionName].Unmanaged
 }
+Set-Alias -Name Wait-AlmSolutionExports -Value Wait-AlmSolutionExport -Force
 
 function Add-AlmExportValidation {
     param(
@@ -340,6 +360,6 @@ function Stop-AlmExportPipeline {
         $State.OperationBudget.Dispose()
         $State.Cancellation.Dispose()
         $State.LogEvents.Signal.Dispose()
-        Remove-Item -LiteralPath $State.WorkDirectory -Recurse -Force
+        Remove-Item -LiteralPath $State.WorkDirectory -Recurse -Force -WhatIf:$false
     }
 }

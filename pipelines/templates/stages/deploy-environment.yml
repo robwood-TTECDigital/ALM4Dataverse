@@ -141,32 +141,40 @@ stages:
                     }
 
                     $rawBuildRunName = '$(resources.pipeline.build.runName)'
-                    $sanitizedBuildRunName = ConvertTo-TagSegment -Value $rawBuildRunName
-                    $versionTag = $sanitizedBuildRunName
-                    $legacyVersionTag = "v$sanitizedBuildRunName"
-                    $environmentTag = 'deployed/${{ parameters.environmentName }}'
                     $buildRunId = '$(resources.pipeline.build.runID)'
+                    $metadataPath = Join-Path '$(Pipeline.Workspace)/build/artifacts' 'build-version.json'
+                    $metadata = $null
+                    if (Test-Path -LiteralPath $metadataPath -PathType Leaf) {
+                      $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+                      if ($metadata.provider -cne 'azdo' -or
+                          $metadata.runId -cne $buildRunId -or
+                          $metadata.sourceCommit -ine '$(resources.pipeline.build.sourceCommit)' -or
+                          $metadata.tag -cne "v$($metadata.version)") {
+                        throw "BUILD version metadata does not match selected BUILD run '$buildRunId'."
+                      }
+                      $versionTag = [string]$metadata.tag
+                    }
+                    else {
+                      $sanitizedBuildRunName = ConvertTo-TagSegment -Value $rawBuildRunName
+                      $versionTag = $sanitizedBuildRunName
+                    }
+                    $environmentTag = 'deployed/${{ parameters.environmentName }}'
                     if ($buildRunId -notmatch '^\d+$') {
                       throw "Could not resolve the Azure DevOps BUILD run ID '$buildRunId'."
                     }
 
-                    $versionTagCandidates = @($versionTag, $legacyVersionTag)
-                    $versionTag = $null
-                    foreach ($candidateTag in $versionTagCandidates) {
-                      Write-Host "Fetching build version tag '$candidateTag' from origin"
-                      git fetch --force origin "refs/tags/${candidateTag}:refs/tags/${candidateTag}"
-                      if ($LASTEXITCODE -eq 0) {
-                        $versionTag = $candidateTag
-                        break
-                      }
-                    }
-                    if ([string]::IsNullOrWhiteSpace($versionTag)) {
-                      throw "Failed to fetch build version tags '$($versionTagCandidates -join ', ')' from origin"
+                    Write-Host "Fetching build version tag '$versionTag' from origin"
+                    git fetch --force origin "refs/tags/${versionTag}:refs/tags/${versionTag}"
+                    if ($LASTEXITCODE -ne 0) {
+                      throw "Failed to fetch build version tag '$versionTag' from origin"
                     }
 
                     $targetCommit = (git rev-list -n 1 "$versionTag").Trim()
                     if ([string]::IsNullOrWhiteSpace($targetCommit)) {
                       throw "Could not resolve a commit SHA from build version tag '$versionTag'"
+                    }
+                    if ($null -ne $metadata -and $targetCommit -ine [string]$metadata.sourceCommit) {
+                      throw "BUILD version tag '$versionTag' resolves to '$targetCommit', not the source commit recorded in build metadata '$($metadata.sourceCommit)'."
                     }
 
                     Write-Host "Updating environment pointer tag '$environmentTag' to BUILD run $buildRunId ($targetCommit)"

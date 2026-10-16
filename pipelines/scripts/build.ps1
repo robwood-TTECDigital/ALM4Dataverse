@@ -1,4 +1,4 @@
-<# 
+<#
 .SYNOPSIS
     Builds the artifacts that can be used to deploy to a Dataverse environment.
 
@@ -18,7 +18,7 @@
 param(
     [Parameter(Mandatory=$true)]
     [string]$SourceDirectory,
-    
+
     [Parameter(Mandatory=$true)]
     [string]$ArtifactStagingDirectory
 )
@@ -54,7 +54,28 @@ function Get-PacCliInstalledPackageVersion {
     return ''
 }
 
-function New-SolutionCheckSeverityCounts {
+function Get-AlmBuildSetting {
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)][hashtable]$Config)
+
+    $settings = @{ parallel = $true; maxParallel = 2 }
+    if ($Config.ContainsKey('build') -and $null -ne $Config.build) {
+        if ($Config.build -isnot [hashtable]) { throw 'build must be a hashtable.' }
+        foreach ($name in @('parallel', 'maxParallel')) {
+            if ($Config.build.ContainsKey($name)) {
+                $value = $Config.build[$name]
+                if ($null -ne $value -and -not ($value -is [string] -and $value -eq '')) { $settings[$name] = $value }
+            }
+        }
+    }
+    if ($settings.parallel -isnot [bool]) { throw 'build.parallel must be $true or $false.' }
+    if ($settings.maxParallel -isnot [int] -or $settings.maxParallel -lt 1 -or $settings.maxParallel -gt 8) {
+        throw 'build.maxParallel must be an integer between 1 and 8.'
+    }
+    return $settings
+}
+
+function New-SolutionCheckSeverityCount {
     return [ordered]@{
         Critical      = 0
         High          = 0
@@ -111,18 +132,18 @@ function Get-SolutionCheckHighestSeverity {
     return 'None'
 }
 
-function Parse-SolutionCheckSeverityCounts {
+function ConvertFrom-SolutionCheckSeverityText {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ConsoleText
     )
 
-    $counts = New-SolutionCheckSeverityCounts
+    $counts = New-SolutionCheckSeverityCount
 
     foreach ($severity in @('Critical', 'High', 'Medium', 'Low', 'Informational')) {
         $escaped = [regex]::Escape($severity)
-        $matches = [regex]::Matches($ConsoleText, "(?im)\b$escaped\b(?:\s+issues?)?\s*[:=]\s*(\d+)\b")
-        foreach ($match in $matches) {
+        $severityMatches = [regex]::Matches($ConsoleText, "(?im)\b$escaped\b(?:\s+issues?)?\s*[:=]\s*(\d+)\b")
+        foreach ($match in $severityMatches) {
             $counts[$severity] += [int]$match.Groups[1].Value
         }
     }
@@ -130,7 +151,7 @@ function Parse-SolutionCheckSeverityCounts {
     return $counts
 }
 
-function Resolve-SolutionCheckExcludedFiles {
+function Resolve-SolutionCheckExcludedFile {
     param(
         [Parameter(Mandatory = $true)]
         [string]$SourceDirectory,
@@ -139,6 +160,7 @@ function Resolve-SolutionCheckExcludedFiles {
         [string]$SolutionName,
 
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
         [array]$Patterns
     )
 
@@ -163,17 +185,17 @@ function Resolve-SolutionCheckExcludedFiles {
             Join-Path $solutionRoot $patternText
         }
 
-        $matches = @(Get-ChildItem -Path $searchPath -File -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-        if ($matches.Count -eq 0 -and (Test-Path $searchPath -PathType Leaf)) {
-            $matches = @((Resolve-Path $searchPath | Select-Object -ExpandProperty Path))
+        $matchedFiles = @(Get-ChildItem -Path $searchPath -File -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+        if ($matchedFiles.Count -eq 0 -and (Test-Path $searchPath -PathType Leaf)) {
+            $matchedFiles = @((Resolve-Path $searchPath | Select-Object -ExpandProperty Path))
         }
 
-        if ($matches.Count -eq 0) {
+        if ($matchedFiles.Count -eq 0) {
             Write-Host "##[warning]No files matched excludedFiles pattern '$patternText' for solution '$SolutionName'."
             continue
         }
 
-        foreach ($match in $matches) {
+        foreach ($match in $matchedFiles) {
             if (-not $resolvedFiles.Contains($match)) {
                 $resolvedFiles.Add($match)
             }
@@ -293,7 +315,7 @@ function Invoke-SolutionCheck {
 
     $solutionCheckEnabled = $false
     foreach ($solution in $Config.solutions) {
-        $solutionLevel = if ($solution.solutionCheck -is [hashtable]) { $solution.solutionCheck } else { @{} }
+        $solutionLevel = if ($solution.ContainsKey('solutionCheck') -and $solution.solutionCheck -is [hashtable]) { $solution.solutionCheck } else { @{} }
         $merged = Merge-AlmConfigValue -DefaultValue $globalSolutionCheck -OverrideValue $solutionLevel
         if ($merged -is [hashtable] -and $merged.ContainsKey('enabled') -and [bool]$merged.enabled) {
             $solutionCheckEnabled = $true
@@ -322,7 +344,7 @@ function Invoke-SolutionCheck {
     $plans = New-Object System.Collections.Generic.List[object]
     foreach ($solution in $Config.solutions) {
         $solutionName = [string]$solution.name
-        $solutionLevel = if ($solution.solutionCheck -is [hashtable]) { $solution.solutionCheck } else { @{} }
+        $solutionLevel = if ($solution.ContainsKey('solutionCheck') -and $solution.solutionCheck -is [hashtable]) { $solution.solutionCheck } else { @{} }
         $settings = Merge-AlmConfigValue -DefaultValue $globalSolutionCheck -OverrideValue $solutionLevel
         if (-not ($settings -is [hashtable])) {
             continue
@@ -370,7 +392,7 @@ function Invoke-SolutionCheck {
 
         $resolvedExcludedFiles = @()
         if (@($excludedFilesRaw).Count -gt 0) {
-            $resolvedExcludedFiles = Resolve-SolutionCheckExcludedFiles -SourceDirectory $SourceDirectory -SolutionName $solutionName -Patterns $excludedFilesRaw
+            $resolvedExcludedFiles = Resolve-SolutionCheckExcludedFile -SourceDirectory $SourceDirectory -SolutionName $solutionName -Patterns $excludedFilesRaw
         }
         $ruleOverrideFile = ConvertTo-SolutionCheckRuleOverrideFile -ReportRoot $solutionCheckRoot -SolutionName $solutionName -RuleLevelOverride $settings.ruleLevelOverride
 
@@ -397,18 +419,18 @@ function Invoke-SolutionCheck {
         $plan = $_
         $ErrorActionPreference = 'Stop'
 
-        function New-Counts {
+        function New-Count {
             return [ordered]@{ Critical = 0; High = 0; Medium = 0; Low = 0; Informational = 0 }
         }
 
-        function Parse-Counts {
+        function ConvertFrom-CountText {
             param([string]$Text)
 
-            $counts = New-Counts
+            $counts = New-Count
             foreach ($severity in @('Critical', 'High', 'Medium', 'Low', 'Informational')) {
                 $escaped = [regex]::Escape($severity)
-                $matches = [regex]::Matches($Text, "(?im)\b$escaped\b(?:\s+issues?)?\s*[:=]\s*(\d+)\b")
-                foreach ($match in $matches) {
+                $severityMatches = [regex]::Matches($Text, "(?im)\b$escaped\b(?:\s+issues?)?\s*[:=]\s*(\d+)\b")
+                foreach ($match in $severityMatches) {
                     $counts[$severity] += [int]$match.Groups[1].Value
                 }
             }
@@ -439,26 +461,26 @@ function Invoke-SolutionCheck {
                 throw 'Power Apps CLI (pac) was not found on PATH.'
             }
 
-            $args = @('solution', 'check', '--path', $plan.SolutionZip, '--outputDirectory', $reportDirectory, '--geo', $plan.Geo)
+            $pacArgs = @('solution', 'check', '--path', $plan.SolutionZip, '--outputDirectory', $reportDirectory, '--geo', $plan.Geo)
 
             if (-not [string]::IsNullOrWhiteSpace($plan.RuleSet)) {
-                $args += @('--ruleSet', $plan.RuleSet)
+                $pacArgs += @('--ruleSet', $plan.RuleSet)
             }
 
             if ($plan.ExcludedFiles -and $plan.ExcludedFiles.Count -gt 0) {
-                $args += @('--excludedFiles', ($plan.ExcludedFiles -join ','))
+                $pacArgs += @('--excludedFiles', ($plan.ExcludedFiles -join ','))
             }
 
             if (-not [string]::IsNullOrWhiteSpace($plan.RuleLevelFile)) {
-                $args += @('--ruleLevelOverride', $plan.RuleLevelFile)
+                $pacArgs += @('--ruleLevelOverride', $plan.RuleLevelFile)
             }
 
-            $output = @(& $pac.Source @args 2>&1)
+            $output = @(& $pac.Source @pacArgs 2>&1)
             $exitCode = $LASTEXITCODE
             $outputText = ($output | ForEach-Object { [string]$_ }) -join "`r`n"
             $outputText | Out-File -FilePath (Join-Path $reportDirectory 'pac-solution-check.log') -Encoding UTF8
 
-            $counts = Parse-Counts -Text $outputText
+            $counts = ConvertFrom-CountText -Text $outputText
             $highest = Get-Highest -Counts $counts
 
             return [pscustomobject]@{
@@ -483,7 +505,7 @@ function Invoke-SolutionCheck {
                 Error             = $true
                 ErrorMessage      = $message
                 ReportDirectory   = $reportDirectory
-                SeverityCounts    = (New-Counts)
+                SeverityCounts    = (New-Count)
                 HighestSeverity   = 'None'
                 FailThreshold     = $plan.FailThreshold
                 ThresholdBreached = $false
@@ -539,36 +561,110 @@ function Invoke-SolutionCheck {
 
 # Read solutions configuration
 $config = Get-AlmConfig -BaseDirectory $SourceDirectory
+$buildSettings = Get-AlmBuildSetting -Config $config
+$solutionNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($solution in $config.solutions) {
+    if (-not $solutionNames.Add([string]$solution.name)) {
+        throw "Duplicate solution in build configuration: $($solution.name)"
+    }
+}
 Write-Host "##[debug]Loaded configuration from alm-config.psd1"
 
-Invoke-Hooks -HookType "preBuild" -BaseDirectory $SourceDirectory -Config $config -AdditionalContext @{
+Invoke-Hook -HookType "preBuild" -BaseDirectory $SourceDirectory -Config $config -AdditionalContext @{
     SourceDirectory = $SourceDirectory
     ArtifactStagingDirectory = $ArtifactStagingDirectory
 }
 
-foreach ($solution in $config.solutions) {
-    $solutionName = $solution.name
-    
-    Write-Host "##[group]Building solution: $solutionName"
-    
-    Write-Host "Packing solution: $solutionName (Managed)"
+$packPlans = @(
+    for ($index = 0; $index -lt $config.solutions.Count; $index++) {
+        $solutionName = [string]$config.solutions[$index].name
+        [pscustomobject]@{
+            Index        = $index
+            SolutionName = $solutionName
+            Path         = Join-Path $SourceDirectory "solutions/$solutionName"
+            OutputPath   = Join-Path $ArtifactStagingDirectory "solutions/$solutionName.zip"
+        }
+    }
+)
+$null = Get-Command -Name 'Compress-DataverseSolutionFile' -ErrorAction Stop
+$packModule = Get-Module -Name 'Rnwood.Dataverse.Data.PowerShell' | Select-Object -First 1
+if ($null -eq $packModule) {
+    Write-Host "##[error]Module Rnwood.Dataverse.Data.PowerShell not found in loaded modules."
+    throw "Module Rnwood.Dataverse.Data.PowerShell not found in loaded modules."
+}
 
-    Compress-DataverseSolutionFile -Verbose `
-        -Path "$SourceDirectory/solutions/$solutionName" `
-        -OutputPath "$ArtifactStagingDirectory/solutions/${solutionName}.zip" `
-        -PackageType Both
-    
-    Write-Host "##[endgroup]"
+if ($buildSettings.parallel) {
+    $buildModulePath = if ($packModule.PSObject.Properties['Path']) { [string]$packModule.Path } else { '' }
+    foreach ($plan in $packPlans) {
+        $plan | Add-Member -NotePropertyName ModulePath -NotePropertyValue $buildModulePath
+    }
+    Write-Host "##[section]Packing $($packPlans.Count) solution(s) with max parallelism $($buildSettings.maxParallel)"
+    $packResults = @($packPlans | ForEach-Object -ThrottleLimit $buildSettings.maxParallel -Parallel {
+        $plan = $_
+        $ErrorActionPreference = 'Stop'
+        try {
+            if (-not [string]::IsNullOrWhiteSpace($plan.ModulePath)) {
+                Import-Module -Name $plan.ModulePath -ErrorAction Stop
+            }
+            $output = @(
+                & {
+                    Compress-DataverseSolutionFile -Verbose `
+                        -Path $plan.Path `
+                        -OutputPath $plan.OutputPath `
+                        -PackageType Both
+                } *>&1 | ForEach-Object { [string]$_ }
+            )
+            [pscustomobject]@{
+                Index        = $plan.Index
+                SolutionName = $plan.SolutionName
+                Output       = $output
+                ErrorMessage = ''
+            }
+        }
+        catch {
+            [pscustomobject]@{
+                Index        = $plan.Index
+                SolutionName = $plan.SolutionName
+                Output       = @()
+                ErrorMessage = ($_ | Out-String).TrimEnd()
+            }
+        }
+    } | Sort-Object Index)
+
+    foreach ($result in $packResults) {
+        Write-Host "##[group]Building solution: $($result.SolutionName)"
+        foreach ($line in $result.Output) {
+            Write-Host "[$($result.SolutionName)][Pack] $line"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($result.ErrorMessage)) {
+            Write-Host "##[error][$($result.SolutionName)][Pack] $($result.ErrorMessage)"
+            Write-Host "##[endgroup]"
+            throw "Failed to pack solution '$($result.SolutionName)': $($result.ErrorMessage)"
+        }
+        Write-Host "##[endgroup]"
+    }
+}
+else {
+    Write-Host "##[section]Packing $($packPlans.Count) solution(s) sequentially"
+    foreach ($plan in $packPlans) {
+        Write-Host "##[group]Building solution: $($plan.SolutionName)"
+        Write-Host "Packing solution: $($plan.SolutionName) (Managed)"
+        Compress-DataverseSolutionFile -Verbose `
+            -Path $plan.Path `
+            -OutputPath $plan.OutputPath `
+            -PackageType Both
+        Write-Host "##[endgroup]"
+    }
 }
 
 Invoke-SolutionCheck -Config $config -SourceDirectory $SourceDirectory -ArtifactStagingDirectory $ArtifactStagingDirectory
 
-if ($config.assets -and $config.assets.Count -gt 0) {
+if ($config.ContainsKey('assets') -and $config.assets -and $config.assets.Count -gt 0) {
     Write-Host "##[group]Copying extra asset files"
     foreach ($asset in $config.assets) {
         $sourcePath = Join-Path $SourceDirectory $asset
         $destinationPath = Join-Path $ArtifactStagingDirectory $asset
-        
+
         if (Test-Path $sourcePath) {
             Write-Host "Copying asset: $asset"
             Copy-Item $sourcePath -Destination $destinationPath -Recurse -Force -Verbose
@@ -586,7 +682,7 @@ Copy-Item (Join-Path $SourceDirectory 'alm-config.psd1') -Destination (Join-Path
 
 # Create lock file with pinned module versions
 $lockConfig = @{
-    scriptDependencies = [hashtable]::new($config.scriptDependencies)
+    scriptDependencies = $config.scriptDependencies.Clone()
     pacCliVersion = [string]$config.pacCliVersion
 }
 foreach ($moduleName in ([string[]] $lockConfig.scriptDependencies.Keys)) {
@@ -619,7 +715,7 @@ Write-Host "##[endgroup]"
 
 Write-Host "##[section]Build completed successfully!"
 
-Invoke-Hooks -HookType "postBuild" -BaseDirectory $SourceDirectory -Config $config -AdditionalContext @{
+Invoke-Hook -HookType "postBuild" -BaseDirectory $SourceDirectory -Config $config -AdditionalContext @{
     SourceDirectory = $SourceDirectory
     ArtifactStagingDirectory = $ArtifactStagingDirectory
 }

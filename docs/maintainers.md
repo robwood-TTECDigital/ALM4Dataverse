@@ -27,28 +27,30 @@ Application teams should start with [updating and customizing](usage/updating.md
 
 ## Local Checks
 
-Use PowerShell 7 from the repository root. YAML-related checks require `powershell-yaml`;
+Use PowerShell 7.2 or newer from the repository root. YAML-related checks require `powershell-yaml`;
 the documentation checker also uses `ConvertFrom-Markdown`/Markdig supplied with PowerShell.
-Install the YAML module from a trusted repository if it is not already available:
+Install the pinned validation tools from the trusted PowerShell Gallery:
 
 ```powershell
-Install-Module powershell-yaml -RequiredVersion 0.4.7 -Repository PSGallery -Scope CurrentUser
+$policy = Import-PowerShellDataFile ./scripts/powershell-validation.psd1
+foreach ($tool in $policy.Tools.GetEnumerator()) {
+    Install-Module -Name $tool.Key -RequiredVersion $tool.Value -Repository PSGallery -Scope CurrentUser -Force
+}
 ```
 
 Run these checks without Dataverse or platform credentials:
 
 ```powershell
-& ./.github/scripts/test-dependency-workflow.ps1
-& ./.github/scripts/test-deployment-options.ps1
-& ./.github/scripts/test-environment-mapping.ps1
-& ./.github/scripts/test-documentation.ps1
+& ./scripts/Test-PowerShell.ps1
 ```
 
 | Check | What it verifies | Boundary |
 | --- | --- | --- |
+| Workflow and pipeline validation | `actionlint` checks checked-in and setup-generated GitHub workflows; the pinned [Microsoft Azure Pipelines schema](https://github.com/microsoft/azure-pipelines-vscode/blob/9e40e814abd20917f273dd587497086f0476a563/service-schema.json) checks checked-in and setup-generated Azure pipeline YAML through Microsoft's language service. | The generic Azure schema does not include organization-specific extensions or expand templates against a live Azure DevOps organization. Known ALM4Dataverse extension tasks and inputs are allowlisted. |
 | Dependency workflow | Data-file parsing, version JSON, update pattern, and branch naming. | Uses fixtures; does not query Gallery or create a PR. |
-| Deployment options | Actual selection/owner blocks with missing, null, empty, false, and true keys under strict mode; generated/copy workflow promotion guards. | No Dataverse import; generator tests create fresh temporary callers, not every existing-file merge case. |
+| Deployment options | Actual deployment scripts with missing, null, empty, false, and true keys under strict mode; generated/copied workflow promotion guards. | Dataverse calls are mocked; generator tests create temporary callers. |
 | Environment mapping | Direct/prefixed variables, selected-secret precedence, and preservation of existing runtime values. | Synthetic process values only; no Azure login. |
+| Parallel export | Concurrency limits, failures, logs, hooks, version stability and resource cleanup. | Real thread jobs with a fake Dataverse module and temporary Git repositories; no live service calls. |
 | Documentation | Local files/heading links, PowerShell/YAML/JSON fenced syntax, and presence of config/action/template names in references. | Not an external-link crawler, live example execution, or semantic proof of all documented behavior. |
 
 For a focused documentation check:
@@ -58,8 +60,9 @@ For a focused documentation check:
 ```
 
 Omit `-SkipCoverage` for the full reference-name check. Review editor Markdown/PowerShell
-diagnostics and `git diff --check` as well. These tests are local entry points; do not
-assume a workflow automatically runs them merely because a test file exists.
+diagnostics and `git diff --check` as well. The Repository Validation workflow runs the
+same shared validator on Windows and Linux. See [PowerShell development](development/powershell.md)
+for suite organization, coverage gates and saved reports.
 
 > [!TIP]
 > Use `ContainsKey` before reading optional hashtable properties under strict mode.
@@ -120,6 +123,8 @@ $outputDirectory = Join-Path ([IO.Path]::GetTempPath()) ('alm-release-' + [guid]
 
 The [stable-release workflow](../.github/workflows/stable-release.yml) responds to pushed
 version tags in the configured three/four-part `v` formats, such as `v1.2.3` or `v1.2.3.4`.
+This publishes the shared ALM4Dataverse code and standalone setup scripts; it is separate
+from branch-suffixed BUILD prereleases and does not promote a BUILD artifact.
 Releasing is a deliberate remote operation:
 
 1. Review the intended source commit, docs, compatibility changes, local checks, and non-production hosted/Dataverse test results.
@@ -142,7 +147,7 @@ the intended assets after publication.
 
 Before release, test relevant changes using intended non-production credentials on both
 platforms where they affect shared behavior. Include authentication modes, source export,
-managed/unmanaged imports, upgrade paths, hooks, workflow promotion, retention/baselines,
+managed/unmanaged imports, upgrade paths, hooks, deployment gates, retention/baselines,
 and retries proportionately to the change. Validate generated caller behavior in hosted
 runs as well as offline YAML checks.
 

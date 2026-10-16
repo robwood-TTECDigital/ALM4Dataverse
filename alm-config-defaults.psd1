@@ -1,33 +1,19 @@
 @{
     hooks = @{
-        # Called by `pipelines/scripts/export.ps1` before exporting solutions.
         preExport  = @()
-
-        # Called by `pipelines/scripts/export.ps1` after exporting/unpacking/version bump logic.
         postExport = @(
             "[alm]/ttec-digital/postexport.ps1"
         )
-
-        # Called by `pipelines/scripts/deploy.ps1` before staging/importing solutions.
         preDeploy  = @(
             "[alm]/ttec-digital/predeploy.ps1"
         )
-
-        # Called by `pipelines/scripts/deploy.ps1` after publish customizations.
         postDeploy = @(
             "[alm]/ttec-digital/postdeploy.ps1"
         )
-
-        # Called by `pipelines/scripts/build.ps1` before packing solutions.
         preBuild   = @()
-
-        # Called by `pipelines/scripts/build.ps1` after packing solutions/copying assets.
         postBuild  = @(
             "[alm]/ttec-digital/postbuild.ps1"
         )
-
-        # Called by `pipelines/scripts/deploy.ps1` after solutions are staged but before upgrades.
-        # Use this for data migration scripts (e.g., moving data from one column to another before they disappear).
         dataMigrations = @(
             "[alm]/ttec-digital/solution-upgrade-migrations.ps1"
         )
@@ -45,6 +31,13 @@
     # Increase this value if solution imports time out in large or complex environments.
     importTimeoutSeconds = 10800
 
+    # Branch release base used by BUILD SemVer and solution versions.
+    # The MAJOR.MINOR pair is mapped to Dataverse solution Major.Build.
+    buildVersion = @{
+        default = '1.0'
+        branches = @{}
+    }
+
     export = @{
         parallel = $true
         maxParallel = 2
@@ -54,6 +47,12 @@
     validation = @{
         parallel = $true
         maxParallel = 4
+    }
+
+    # Maximum number of solutions to pack concurrently during BUILD.
+    build = @{
+        parallel = $true
+        maxParallel = 2
     }
 
     # PAC solution check configuration used during BUILD.

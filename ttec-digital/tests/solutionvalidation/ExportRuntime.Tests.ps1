@@ -3,9 +3,18 @@ BeforeAll {
     . "$PSScriptRoot/../../common/solutionvalidation.ps1"
     . "$PSScriptRoot/../../../pipelines/scripts/parallel-export.ps1"
     . "$PSScriptRoot/../../../pipelines/scripts/common.ps1"
-    function Invoke-DataverseSQL { param($Sql, $Parameters) }
-    function Get-DataverseRecord { param($TableName, $Id, $Columns, $Top) }
-    function Get-DataverseEntityMetadata { param($EntityName, [switch]$UseMetadataCache, [switch]$ExcludeAttributes, [switch]$ExcludeRelationships, [switch]$ExcludePrivileges) }
+    function Invoke-DataverseSQL {
+        param($Sql, $Parameters)
+        $null = @($Sql, $Parameters)
+    }
+    function Get-DataverseRecord {
+        param($TableName, $Id, $Columns, $Top)
+        $null = @($TableName, $Id, $Columns, $Top)
+    }
+    function Get-DataverseEntityMetadata {
+        param($EntityName, [switch]$UseMetadataCache, [switch]$ExcludeAttributes, [switch]$ExcludeRelationships, [switch]$ExcludePrivileges)
+        $null = @($EntityName, $UseMetadataCache, $ExcludeAttributes, $ExcludeRelationships, $ExcludePrivileges)
+    }
 }
 
 Describe 'Strict-mode export configuration' {
@@ -64,7 +73,7 @@ Describe 'Strict-mode export configuration' {
         Mock Test-Path { throw 'Unexpected hook execution' }
         foreach ($config in @(@{}, @{hooks=$null}, @{hooks=@{}}, @{hooks=@{postExport=$null}}, @{hooks=@{postExport=@()}}, @{hooks=@{postExport=''}})) {
             Test-AlmEarlyExportValidation -Config $config | Should -BeFalse
-            Invoke-Hooks -HookType postExport -BaseDirectory $TestDrive -Config $config
+            Invoke-Hook -HookType postExport -BaseDirectory $TestDrive -Config $config
         }
         Should -Invoke Test-Path -Exactly -Times 0
     }
@@ -185,7 +194,7 @@ Describe 'Validation worker reporting and budgets' {
 
     It 'retains failure details and releases a held slot' {
         $context = [pscustomobject]@{solutionname='TestSolution1';ruleMode='error'}
-        $rule = @{Name='Failure';Mode='error';Path={param($context) Write-Host 'Before failure'; throw 'Deliberate rule failure'}}
+        $rule = @{Name='Failure';Mode='error';Path={param($context) $null = $context; Write-Host 'Before failure'; throw 'Deliberate rule failure'}}
         $budget = [System.Threading.SemaphoreSlim]::new(1,1)
         try {
             $caughtError = $null
@@ -205,7 +214,7 @@ Describe 'Validation worker reporting and budgets' {
 
     It 'prints queued failure details with a rule prefix on every line' {
         $context = [pscustomobject]@{solutionname='TestSolution1';ruleMode='error'}
-        $rule = @{Name='Failure';Path={param($context) throw "First failure detail`nSecond failure detail"}}
+        $rule = @{Name='Failure';Path={param($context) $null = $context; throw "First failure detail`nSecond failure detail"}}
         $events = [pscustomobject]@{Queue=[System.Collections.Concurrent.ConcurrentQueue[object]]::new();Signal=[System.Threading.AutoResetEvent]::new($false)}
         try {
             { Invoke-AlmValidationRule -Rule $rule -Context $context -Events $events } | Should -Throw '*First failure detail*'
@@ -372,7 +381,11 @@ Describe 'Export validation lookup caching' {
 Describe 'Bounded export scheduling' {
     BeforeEach {
         $cloneMethod = [pscustomobject]@{}
-        $cloneMethod | Add-Member -MemberType ScriptMethod -Name Invoke -Value { param($Connection, $Arguments); [pscustomobject]@{} }
+        $cloneMethod | Add-Member -MemberType ScriptMethod -Name Invoke -Value {
+            param($Connection, $Arguments)
+            $null = @($Connection, $Arguments)
+            [pscustomobject]@{}
+        }
         $state = @{
             PendingExports = [System.Collections.Generic.Queue[object]]::new()
             ActiveExports = [System.Collections.Generic.List[object]]::new()

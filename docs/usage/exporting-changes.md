@@ -17,8 +17,14 @@ The `EXPORT` pipeline for each repo takes the state of the solution(s) (and othe
 - Save and publish the intended maker changes, and confirm the configured solutions contain all required components.
 - Check the selected branch and its development Dataverse URL. EXPORT writes to that branch directly; it does not open a pull request.
 - Coordinate with other makers using the same development environment. All configured solution changes are exported, not just the caller's changes.
-- Ensure the automation identity can export solutions, update solution versions, and push to the branch. Branch protection may require an integration branch instead of exporting directly to `main`.
-- Review data hooks before running them: exported records become repository contents and must not contain secrets or inappropriate personal data.
+
+> [!IMPORTANT]
+> Ensure the automation identity can export solutions, update solution versions,
+> and push to the branch. Branch protection may require an integration branch
+> instead of exporting directly to `main`.
+>
+> Review data hooks before running them: exported records become repository
+> contents and must not contain secrets or inappropriate personal data.
 
 > [!TIP]
 > Export frequently; there is no need to wait until you are ready to deploy. Each export
@@ -66,7 +72,7 @@ with other makers sharing that environment.
 1. Dependencies are installed and the application identity connects to the development environment.
 2. `preExport` hooks run.
 3. Each configured solution is exported to `solutions/<unique-name>`, including unpacked canvas-app content. Existing source is replaced by the export.
-4. Solution changes are compared with the prior source; changed solutions have their versions updated in both source and Dataverse.
+4. Solution changes are compared with the prior source; changed solutions reserve a unique version tag, then have their versions updated in both source and Dataverse.
 5. `postExport` hooks run, including configured data exports.
 6. All working-tree changes are committed with the supplied message and pushed. Azure DevOps uses the requesting user's name/email; GitHub uses the triggering actor and a GitHub noreply address.
 
@@ -80,13 +86,48 @@ No detected changes means no new commit. Data-only hook changes can create a com
 
 ### Version Increments
 
-| Detected solution change | Version effect | Example |
-| --- | --- | --- |
-| Additive change, or first export with no prior source | Increment revision | `1.2.3.4` becomes `1.2.3.5` |
-| Non-additive component change | Increment minor and reset build/revision | `1.2.3.4` becomes `1.3.0.0` |
-| No source changes | No increment | Version remains unchanged |
+EXPORT increments changed solution versions according to the branch's configured
+base and detected change type. During deployment, matching solution Major.Minor
+versions permit updates; a different Major.Minor can require an upgrade.
 
-This matters during deployment: matching major/minor versions permit updates; a different major/minor can require an upgrade that removes obsolete components. Detection is based on solution component comparison, not a guarantee that a business change is backward-compatible. The CI build/release identity is separate from each solution's version.
+> [!NOTE]
+> **Advanced: version calculation and reservations.** The branch's configured
+> `buildVersion` MAJOR.MINOR sets the solution's `Major.Build` base. The solution
+> version format is `Major.Minor.Build.Revision`; `Minor` remains the
+> non-additive upgrade counter used by DEPLOY. If an exported solution's
+> `Major.Build` differs from the branch base, EXPORT resets its minor and
+> revision counters before applying the current change's increment.
+>
+> | Detected solution change | Version effect | Example |
+> | --- | --- | --- |
+> | Additive change (or first export) with matching `Major.Build` | Increment revision | With base `2.3`, `2.4.3.7` becomes `2.4.3.8` |
+> | Non-additive change with matching `Major.Build` | Increment minor and reset revision | With base `2.3`, `2.4.3.7` becomes `2.5.3.0` |
+> | Additive change with mismatched `Major.Build` | Reset minor/revision, then increment revision | With base `2.3`, `1.9.8.9` becomes `2.0.3.1` |
+> | Non-additive change with mismatched `Major.Build` | Reset minor/revision, then increment minor | With base `2.3`, `1.9.8.9` becomes `2.1.3.0` |
+> | No source changes | No increment | Version remains unchanged |
+>
+> Changed solutions reserve their four-part version using a lightweight Git
+> tag named `alm4dv/solution-version/<solution-unique-name>/<version>` (for
+> example, `alm4dv/solution-version/Example/2.4.3.8`). The reservation tag is
+> pushed to `origin` before the version is written to the exported solution.
+> If another branch already reserved that version, EXPORT applies the same
+> change-type increment again and retries. The push is the atomic claim, so
+> simultaneous exports cannot both reserve the same version.
+>
+> Reservation tags are not release tags and do not trigger BUILD workflows.
+> They are not removed when a later export step fails; this leaves a gap rather
+> than allowing another branch to reuse the version. Do not delete or
+> force-update these tags. GitHub EXPORT needs `contents: write`; the Azure
+> DevOps build identity needs permission to create repository tags.
+>
+> When EXPORT runs on a non-default branch without a matching
+> `buildVersion.branches` entry, it warns that `buildVersion.default` is being
+> used. Configure an explicit branch base when that branch needs a different
+> MAJOR.MINOR.
+>
+> Component comparison determines the change type, but does not guarantee that
+> a business change is backward-compatible. The CI build/release identity is
+> separate from each solution's version.
 
 ## Verify And Continue
 
@@ -98,102 +139,39 @@ Review the resulting commit for unintended solution/data changes, then check [BU
 > appropriate, and rerun. EXPORT may already have updated Dataverse versions before a
 > later Git failure. See [importing changes](importing-changes.md) for safe synchronization.
 
-## Export Processing and Validation
+## Export Processing
 
-Managed and unmanaged packages are exported in parallel by default, including
-both packages of the same solution. Unpacking, change detection and version
-updates still run in the configured solution order.
+Managed and unmanaged packages are exported in parallel by default, with up to
+two package exports at once. Unpacking, change detection, and version updates
+still run in the configured solution order. Pre-export and post-export hooks
+keep their existing order and context.
 
-In the TTEC Digital fork, custom validation can start after a solution is
-unpacked while later exports are still running. This is used only when the
-standard fork post-export hook is first and no legacy `PostExportScript` is
-configured. Otherwise validation runs in the post-export hook, after exports.
-Custom hooks, data exports, Power Pages downloads and Synapse exports keep their
-existing order.
-
-The defaults in `alm-config.psd1` are:
-
-```powershell
-export = @{
-  parallel = $true
-  maxParallel = 2
-  maxConcurrentOperations = 4
-}
-validation = @{
-  parallel = $true
-  maxParallel = 4
-}
-```
-
-The defaults allow up to two concurrent package exports and up to four concurrent
-custom rules, subject to a shared limit of four operations. The limit also applies to version updates and
-validation run by post-export hooks. Each running rule counts as one operation;
-custom hooks are not limited by these settings.
-
-Set `export.parallel = $false` for sequential exports, or
-`validation.parallel = $false` for sequential rules. These settings are
-independent. The parallelism limits accept integers from `1` to `8`. See
-[ALM Configuration](../config/alm-config.md#export-processing) for the full settings reference.
-
-Validation still runs for unchanged solutions. Allowed dependencies include
-configured external dependencies and preceding solutions only. Error, warning,
-disabled and rule/component override behaviour is unchanged. Results are reported
-in rule order, not completion order. Custom EXPORT validation is separate from
-the BUILD PAC checker.
+Set `export.parallel = $false` in `alm-config.psd1` for sequential exports.
+`export.maxParallel` controls simultaneous package exports;
+`export.maxConcurrentOperations` limits package exports and environment version
+updates together. Both limits accept integers from `1` to `8`. Custom hooks are
+outside these limits. See [Export Processing settings](../config/alm-config.md#export-processing).
 
 ## Export Logs
 
-Live messages identify the solution and phase, with custom rule events formatted
-as `[Solution][Validate:Rule]`. Detailed export and validation output is grouped
-by solution and phase. Every line of a finding identifies its solution.
+Live messages identify the solution and phase, for example
+`[MySolution][Export:Managed]`. Detailed package output is grouped by solution
+and phase. Failures include the actual error in the standard log.
 
-Rule execution failures print the actual error and its exception context directly
-in the standard log, with `[Solution][Validate:Rule]` on every line. Detailed
-artifacts are additional diagnostics, not a replacement for the error in the log.
+The final summary reports each solution's completed packages and elapsed export
+time, including on failure. Export duration is elapsed time, not the sum of
+concurrent package durations. Package counts and export durations are unavailable
+in sequential mode.
 
-The final summary reports validation status, finding counts and available
-timings for each solution, including on failure. Export duration measures elapsed
-time, not the sum of concurrent export times. `NotReported` means no validation
-summary was produced; it does not mean validation passed.
+Detailed logs, `summary.json`, and parallel package `timings.json` are retained
+under `export-logs` in the artifact staging directory. Azure DevOps publishes
+the `export-logs` artifact, and GitHub Actions uploads it even if export fails.
+Local runs retain the same files.
 
-Detailed logs, findings, rule timings and `summary.json` are retained under
-`export-logs` in the artifact staging directory. Azure DevOps publishes the
-`export-logs` artifact, and GitHub Actions uploads it even if export fails.
-Local runs retain the same files, including logs from rules that produce no
-output or fail.
-
-For local performance measurements, `pipelines/scripts/export.ps1 -PassThru`
-returns total elapsed seconds and export/validation timings. Authentication and dependency
-installation are outside that measurement.
-
-## Runtime Measurement
-
-A single before/after pair on 2026-10-12 measured the complete EXPORT script for
-`TestSolution1` and `TestSolution1RuntimeDependencies`, not just individual rules:
-
-| Configuration | Total elapsed time |
-| --- | --- |
-| Merge-only baseline, before the export improvements | 162.052 seconds |
-| All export improvements enabled with default concurrency settings | 82.021 seconds |
-| Reduction | 80.031 seconds (49.4%) |
-
-Both runs used the same populated solution sources and the same Dataverse
-environment, with `Rnwood.Dataverse.Data.PowerShell` 3.0.3 and PAC 2.7.4. The
-baseline was the fork before these export and validation improvements. The
-improved run used the default concurrency settings shown above.
-
-Each run reported the same two fixture findings. Exported sources and environment
-solution versions stayed unchanged. Git writes and version updates
-were disabled for the measurement; validation ran in warning mode. Timing
-included solution exports, source processing, post-export hooks and validation,
-but excluded authentication, dependency installation and final Git commit/push.
-
-> [!NOTE]
-> This is one measured pair, not an average or median. The improved run followed
-> the baseline, so cache warmth and Dataverse service variability can affect the
-> comparison. These test solutions primarily contain tables, columns and lookup
-> relationships; apps, flows, large datasets and custom hooks can have different
-> runtime characteristics. The result is not a performance guarantee.
+For local measurements, `pipelines/scripts/export.ps1 -PassThru` returns
+`Parallel`, `TotalSeconds`, and `WorkerTimings`. Authentication and dependency
+installation are outside this measurement. This switch does not disable source
+changes, environment version updates, or hooks.
 
 ## Viewing Exported Changes
 

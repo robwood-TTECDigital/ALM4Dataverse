@@ -46,15 +46,36 @@
         # }
     )
 
+    # BUILD SemVer settings. PATCH is the CI run number; the branch/provider
+    # prerelease suffix is removed when the successful build is promoted.
+    # MAJOR.MINOR also maps to solution Major.Build; solution Minor tracks upgrades.
+    buildVersion = @{
+        # MAJOR.MINOR used for branches without a specific entry.
+        default = '1.0'
+
+        # Keys are full branch names; values are MAJOR.MINOR.
+        branches = @{
+            main = '1.0'
+            # 'develop' = '1.1'
+            # 'release/1.x' = '1.0'
+        }
+    }
+
     export = @{
         parallel = $true
         maxParallel = 2
         maxConcurrentOperations = 4
     }
 
+    # Maximum number of custom EXPORT validation rules to run concurrently.
     validation = @{
         parallel = $true
         maxParallel = 4
+    }
+
+    build = @{
+        parallel = $true
+        maxParallel = 2
     }
 
     # Extra folders/files to include in build artifacts (copied verbatim).
@@ -120,7 +141,7 @@
     # PowerShell modules required by the scripts in addition to the default modules.
     # or to override with specific versions.
 
-    # Key = module name, 
+    # Key = module name,
     # Value = version ('' = latest stable version, 'prerelease' = latest prerelease, or specific version).
     scriptDependencies = @{
         # Example:

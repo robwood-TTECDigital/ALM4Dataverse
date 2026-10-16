@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-function Get-GitHubApiHeaders {
+function Get-GitHubApiHeader {
     return @{
         Authorization = "Bearer $($env:GITHUB_TOKEN)"
         Accept = 'application/vnd.github+json'
@@ -16,7 +16,7 @@ function Invoke-GitHubApi {
 
     $uri = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/$RelativePath"
     try {
-        return Invoke-RestMethod -Uri $uri -Headers (Get-GitHubApiHeaders)
+        return Invoke-RestMethod -Uri $uri -Headers (Get-GitHubApiHeader)
     }
     catch {
         $statusCode = $null
@@ -130,10 +130,10 @@ function ConvertTo-GateTagSegment {
 function Resolve-WorkflowDispatchBranch {
     param([Parameter(Mandatory)][object]$GitHubContext)
 
-    $refType = if ($GitHubContext.PSObject.Properties.Name -contains 'ref_type') { [string]$GitHubContext.ref_type } else { '' }
-    $refName = if ($GitHubContext.PSObject.Properties.Name -contains 'ref_name') { [string]$GitHubContext.ref_name } else { '' }
+    $refType = if ($null -ne $GitHubContext.PSObject.Properties['ref_type']) { [string]$GitHubContext.ref_type } else { '' }
+    $refName = if ($null -ne $GitHubContext.PSObject.Properties['ref_name']) { [string]$GitHubContext.ref_name } else { '' }
 
-    if ([string]::IsNullOrWhiteSpace($refName) -and $GitHubContext.PSObject.Properties.Name -contains 'ref') {
+    if ([string]::IsNullOrWhiteSpace($refName) -and $null -ne $GitHubContext.PSObject.Properties['ref']) {
         $fullRef = [string]$GitHubContext.ref
         if ($fullRef -match '^refs/heads/(?<branch>.+)$') {
             $refName = $Matches['branch']
@@ -224,7 +224,7 @@ function Get-BuildMetadataForTag {
     }
 }
 
-function Get-ReleaseMetadata {
+function Get-ReleaseInformation {
     param([Parameter(Mandatory)][object]$Release)
 
     $body = [string]$Release.body
@@ -253,7 +253,8 @@ function Find-LatestManagedReleaseForBranch {
         $releases = @(Invoke-GitHubApi -RelativePath "releases?per_page=100&page=$page")
         if ($releases.Count -eq 0) { break }
         foreach ($release in $releases) {
-            try { $metadata = Get-ReleaseMetadata -Release $release } catch { continue }
+            try { $metadata = Get-ReleaseInformation -Release $release } catch { continue }
+            if (-not (Test-GitHubReleasePrerelease -Release $release)) { continue }
             if ($metadata.Branch -cne $BranchName) { continue }
 
             $match = [pscustomobject]@{
@@ -271,6 +272,16 @@ function Find-LatestManagedReleaseForBranch {
     return $latestMatch
 }
 
+function Test-GitHubReleasePrerelease {
+    param([Parameter(Mandatory)][object]$Release)
+
+    if ($Release -is [System.Collections.IDictionary]) {
+        return $Release.Contains('prerelease') -and [bool]$Release['prerelease']
+    }
+    $property = $Release.PSObject.Properties['prerelease']
+    return $null -ne $property -and [bool]$property.Value
+}
+
 function Find-ReleaseForBuildRun {
     param([Parameter(Mandatory)][string]$RunId)
 
@@ -279,7 +290,8 @@ function Find-ReleaseForBuildRun {
         $releases = @(Invoke-GitHubApi -RelativePath "releases?per_page=100&page=$page")
         if ($releases.Count -eq 0) { break }
         foreach ($release in $releases) {
-            try { $releaseMetadata = Get-ReleaseMetadata -Release $release } catch { continue }
+            if (-not (Test-GitHubReleasePrerelease -Release $release)) { continue }
+            try { $releaseMetadata = Get-ReleaseInformation -Release $release } catch { continue }
             if ($releaseMetadata.RunId -ceq $RunId) {
                 $matchingReleases += [pscustomobject]@{
                     Release = $release
@@ -362,30 +374,19 @@ if ($eventName -eq 'workflow_dispatch' -and -not [string]::IsNullOrWhiteSpace($m
             break
         }
     }
-    if ([string]::IsNullOrWhiteSpace($requestedReleaseTag)) { $requestedReleaseTag = $normalizedTag }
 }
 if ([string]::IsNullOrWhiteSpace($requestedReleaseTag) -and [string]::IsNullOrWhiteSpace($manualSelector)) {
     $latest = Find-LatestManagedReleaseForBranch $callerBranch
     if ($null -ne $latest) {
         $metadata = $latest.Metadata
-        $normalizedTag = ConvertTo-BuildReleaseTag $metadata.BuildName
-        $tagCandidates = @($normalizedTag, "v$normalizedTag")
-        foreach ($tagCandidate in $tagCandidates) {
-            $release = Get-GitHubReleaseByTag $tagCandidate
-            if ($null -ne $release) {
-                $requestedReleaseTag = [string]$release.tag_name
-                break
-            }
-        }
-        if ([string]::IsNullOrWhiteSpace($requestedReleaseTag)) {
-            $requestedReleaseTag = $normalizedTag
-        }
+        $release = $latest.Release
+        $requestedReleaseTag = [string]$release.tag_name
     }
 }
 if (-not [string]::IsNullOrWhiteSpace($requestedReleaseTag) -and $null -eq $release) {
     $release = Get-GitHubReleaseByTag $requestedReleaseTag
 }
-if ($null -ne $release) { $metadata = Get-ReleaseMetadata $release }
+if ($null -ne $release) { $metadata = Get-ReleaseInformation $release }
 if ($null -eq $metadata -and -not [string]::IsNullOrWhiteSpace($requestedReleaseTag)) { $metadata = Get-BuildMetadataForTag $requestedReleaseTag }
 if ($null -ne $metadata) {
     if ($metadata.Branch -cne $callerBranch) { throw "Release/build branch '$($metadata.Branch)' does not match deployment branch '$callerBranch'." }
@@ -439,8 +440,8 @@ if ($requestedReleaseTag) { $tagSha = Resolve-GitTagCommitSha $requestedReleaseT
 $releaseHasArtifacts = $false
 if ($null -ne $release) { $releaseHasArtifacts = @($release.assets | Where-Object { $_.name -eq 'artifacts.zip' }).Count -gt 0 }
 
-$requiredGateTag = if ($promotionMode -eq 'manual-gate-tag' -and $previousName) { "$buildTagKey/deployed/$previousName" } else { '' }
-$successGateTag = "$buildTagKey/deployed/$environmentName"
+$requiredGateTag = if ($promotionMode -eq 'manual-gate-tag' -and $previousName) { "deployed/$buildTagKey/$previousName" } else { '' }
+$successGateTag = if ($promotionMode -eq 'manual-gate-tag') { "deployed/$buildTagKey/$environmentName" } else { '' }
 $environmentPointerTag = "deployed/$environmentName"
 $artifactSource = if ($releaseHasArtifacts) { 'release' } else { 'build' }
 

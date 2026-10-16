@@ -41,7 +41,8 @@ The supplied template additionally includes the `data` asset and example data ho
 | Setting | Type | Default or template value |
 | --- | --- | --- |
 | `solutions` | Array of hashtables | Empty in the template; list solutions in dependency order. |
-| `export` | Hashtable | Up to two concurrent package exports; a shared limit of four operations with validation. |
+| `buildVersion` | Hashtable | Shared default is `'1.0'`; optional MAJOR.MINOR override and full-branch overrides. |
+| `export` | Hashtable | Up to two concurrent package exports; a shared limit of four operations with version updates. |
 | `validation` | Hashtable | Up to four concurrent custom EXPORT rules. |
 | `assets` | Array of paths | `@('data')` in the template. |
 | `hooks` | Hashtable of script-path arrays | Empty except the template's `postExport` and `postDeploy` data hooks. |
@@ -52,6 +53,49 @@ The supplied template additionally includes the `data` asset and example data ho
 | `solutionCheck` | Hashtable | Disabled; full settings below. |
 
 ## Configuration Sections
+
+### BUILD SemVer
+
+`buildVersion` assigns a MAJOR.MINOR version line to each branch. Set a shared
+default and, when needed, full branch-name overrides:
+
+```powershell
+buildVersion = @{
+    default = '1.0'
+    branches = @{
+        main          = '2.0'
+        develop       = '1.5'
+        'release/1.x' = '1.4'
+    }
+}
+```
+
+The shared configuration defaults `buildVersion.default` to `'1.0'`. Set
+`default` to override the base for unlisted branches, and add entries under
+`branches` for branch-specific release lines.
+
+> [!NOTE]
+> **Advanced: version derivation.** Branch keys are full branch names, including
+> any slash-separated prefix. Values must be two non-negative SemVer integers
+> without leading zeroes, such as `'2.1'`; BUILD and EXPORT fail early if the
+> selected value is invalid.
+>
+> The CI run number supplies PATCH, and the normalized branch name is the
+> SemVer prerelease identifier. For example, `main` might produce
+> `2.1.42-main`, while `feat/abc` with the default `1.0` base might produce
+> `1.0.43-feat-abc`. Slashes and other branch punctuation become hyphens.
+> Numeric-only branch slugs with leading zeroes get a `b` prefix to remain
+> valid SemVer identifiers (for example, branch `01` becomes `b01`). Every
+> build retains this branch suffix in its version and source tag; no stable
+> build promotion is provided.
+>
+> For solution versions, the configured MAJOR.MINOR maps to the Dataverse
+> solution's `Major.Build` components. The solution's `Minor` component remains
+> the non-additive upgrade counter used by DEPLOY.
+>
+> `build-version.json` in each artifact records its version, branch, provider,
+> source commit, and exact CI run ID. Azure DevOps and GitHub keep the original
+> branch-suffixed build identity for deployment and baseline selection.
 
 ### Solutions
 
@@ -103,31 +147,45 @@ validation = @{
 
 | Setting | Type | Default | Behavior |
 | --- | --- | --- | --- |
-| `export.parallel` | Boolean | `$true` | Export managed/unmanaged packages concurrently; `$false` retains sequential export. |
+| `export.parallel` | Boolean | `$true` | Export managed and unmanaged packages concurrently; `$false` retains sequential export. |
 | `export.maxParallel` | Integer, `1` to `8` | `2` | Maximum simultaneous package exports, including both packages of the same solution. |
-| `export.maxConcurrentOperations` | Integer, `1` to `8` | `4` | Shared limit for package exports, running custom rules, and version updates; also applies to validation run by post-export hooks. |
+| `export.maxConcurrentOperations` | Integer, `1` to `8` | `4` | Shared limit for package exports and environment version updates. Custom hooks are not limited by this setting. |
 | `validation.parallel` | Boolean | `$true` | Run custom EXPORT rules concurrently; `$false` retains sequential rules, independently of export mode. |
 | `validation.maxParallel` | Integer, `1` to `8` | `4` | Maximum simultaneous custom validation rules per solution. |
 
 Missing, null, or empty optional settings use the defaults; an explicit `$false`
 is preserved. Invalid types or out-of-range limits fail with a configuration error.
-Findings retain rule order and existing solution, rule and component overrides.
+Unpacking, change detection, and version updates run in configured solution order.
+Pre-export and post-export hooks keep their existing order and context.
 
-Exports and validation can overlap without exceeding the shared limit. Each
-running validation rule counts as one operation, regardless of how many Dataverse
-requests it makes. Custom hooks are not limited by these settings. Unpacking,
-change detection and version updates run in configured solution order.
+See [Export Logs](../usage/exporting-changes.md#export-logs) for progress messages,
+per-solution summaries and retained diagnostics.
 
-Early validation requires the standard fork post-export hook to be first and no
-legacy `PostExportScript`. Otherwise validation runs in the hooks after export.
-Allowed dependencies still include only external dependencies and preceding
-solutions. Other hooks, data exports, Power Pages and Synapse keep their order.
-The `solutionCheck` PAC checker remains a BUILD concern.
+Custom validation rules use the `validation` settings independently of package
+export parallelism. Exports and validation can overlap without exceeding
+`export.maxConcurrentOperations`; each running rule counts as one operation.
+Findings retain rule order and existing solution, rule, and component overrides.
+Early validation requires the fork's standard post-export hook to be first and
+no legacy `PostExportScript`; otherwise it runs as a post-export hook. Other
+hooks, data exports, Power Pages, and Synapse processing retain their order.
+The PAC `solutionCheck` remains a BUILD concern.
 
-See [Exporting changes](../usage/exporting-changes.md#export-logs) for tagged live
-events, grouped details, per-solution summaries and retained `export-logs` artifacts.
-For local measurements, `pipelines/scripts/export.ps1 -PassThru` returns elapsed
-time and export/validation timings; authentication and dependency installation are excluded.
+### Build Processing
+
+```powershell
+build = @{
+    parallel = $true
+    maxParallel = 2
+}
+```
+
+| Setting | Type | Default | Behavior |
+| --- | --- | --- | --- |
+| `build.parallel` | Boolean | `$true` | Pack solutions concurrently; `$false` packs them sequentially. |
+| `build.maxParallel` | Integer, `1` to `8` | `2` | Maximum number of solutions packed at the same time. |
+
+Missing, null, or empty optional settings use the defaults; an explicit `$false`
+is preserved. Invalid types or out-of-range limits fail with a configuration error.
 
 ### Assets
 

@@ -17,14 +17,19 @@
 param(
     [Parameter(Mandatory=$true)]
     [string]$SourceDirectory,
-    
+
     [Parameter(Mandatory=$true)]
     [string]$ArtifactStagingDirectory,
 
     [string]$TempDirectory = "([IO.Path]::GetTempPath())\$([IO.Path]::GetTempFileName())",
-    
+
     [Parameter(Mandatory=$false)]
     [string]$EnvironmentName = "Unknown",
+
+    [Parameter(Mandatory=$true)]
+    [string]$BranchName,
+
+    [string]$DefaultBranchName,
 
     [switch]$PassThru
 )
@@ -39,9 +44,16 @@ Write-Host "##[section]Exporting Solutions from $EnvironmentName"
 
 # Read solutions configuration
 $solutionsConfig = Get-AlmConfig -BaseDirectory $SourceDirectory -LogConfig:$false
-$exportSettings = Get-AlmExportSettings -Config $solutionsConfig
+$exportSettings = Get-AlmExportSetting -Config $solutionsConfig
+$branchBaseVersion = Resolve-AlmBranchBaseVersion -Config $solutionsConfig -BranchName $BranchName
+if (-not $branchBaseVersion.HasBranchOverride) {
+    $defaultBranch = Resolve-AlmDefaultBranchName -RepositoryPath $SourceDirectory -DefaultBranchName $DefaultBranchName
+    if ($branchBaseVersion.BranchName -cne $defaultBranch) {
+        Write-Warning "EXPORT is using buildVersion.default '$($branchBaseVersion.MajorMinor)' on non-default branch '$($branchBaseVersion.BranchName)' (default branch '$defaultBranch'). Configure buildVersion.branches for this branch to select an explicit base version."
+    }
+}
 
-Invoke-Hooks -HookType "preExport" -BaseDirectory $SourceDirectory -Config $solutionsConfig -LogContext:$false -AdditionalContext @{
+Invoke-Hook -HookType "preExport" -BaseDirectory $SourceDirectory -Config $solutionsConfig -LogContext:$false -AdditionalContext @{
     SourceDirectory = $SourceDirectory
     ArtifactStagingDirectory = $ArtifactStagingDirectory
     TempDirectory = $TempDirectory
@@ -49,40 +61,24 @@ Invoke-Hooks -HookType "preExport" -BaseDirectory $SourceDirectory -Config $solu
 }
 
 $exportPipeline = $null
-$exportValidationResults = @{}
-$exportValidationSummaries = @{}
-$exportLogDirectory = Join-Path $ArtifactStagingDirectory 'export-logs'
 $exportStatus = 'Failed'
-$exportOperationBudget = $null
-$exportCancellationToken = [System.Threading.CancellationToken]::None
-$validDependencyNames = @()
-foreach ($key in @('ExternalDependencySolutionNames', 'DependencySolutions')) {
-    if ($solutionsConfig.ContainsKey($key)) {
-        $validDependencyNames += @($solutionsConfig[$key] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
-    }
-}
+$exportLogDirectory = Join-Path $ArtifactStagingDirectory 'export-logs'
 try {
 if ($exportSettings.parallel) {
     $exportPipeline = Start-AlmExportPipeline -Config $solutionsConfig -TempDirectory $TempDirectory -MaxParallel $exportSettings.maxParallel
     $exportPipeline.LogDirectory = $exportLogDirectory
-    $exportOperationBudget = $exportPipeline.OperationBudget
-    $exportCancellationToken = $exportPipeline.Cancellation.Token
-    Start-AlmQueuedExports -State $exportPipeline
-} else {
-    $exportOperationBudget = [System.Threading.SemaphoreSlim]::new($exportSettings.maxConcurrentOperations, $exportSettings.maxConcurrentOperations)
+    Start-AlmQueuedExport -State $exportPipeline
 }
 foreach ($solution in $solutionsConfig.solutions) {
     $solutionName = $solution.name
     $exportZipPath = $null
-    if ($null -ne $exportPipeline) {
-        $exportZipPath = Wait-AlmSolutionExports -State $exportPipeline -SolutionName $solutionName
-    }
-    
+    if ($null -ne $exportPipeline) { $exportZipPath = Wait-AlmSolutionExport -State $exportPipeline -SolutionName $solutionName }
+
     Write-Host "[$solutionName][Unpack] Started (managed and unmanaged)"
-    
+
     if (-not (Test-Path "$SourceDirectory/solutions")) {
         New-Item -ItemType Directory -Path "$SourceDirectory/solutions" | Out-Null
-    } 
+    }
 
     if ((Test-Path $SourceDirectory/solutions/$solutionName)) {
         Compress-DataverseSolutionFile -PackageType Managed -OutputPath "$TempDirectory/$solutionName-managed.old.zip" -Path "$SourceDirectory/solutions/$solutionName"
@@ -96,9 +92,9 @@ foreach ($solution in $solutionsConfig.solutions) {
         & { $ProgressPreference = 'SilentlyContinue'; Export-DataverseSolution -Verbose -SolutionName $solutionName -OutFolder "$SourceDirectory/solutions/$solutionName" -UnpackMsApp } *>&1 |
             ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { throw $_ }; Format-AlmLogLine -SolutionName $solutionName -Phase ExportUnpack -Text ([string]$_) | ForEach-Object { Write-Host $_ } }
     }
-    
+
     Write-Host "[$solutionName][Unpack] Completed"
-   
+
     Write-Host "[$solutionName][Compare] Checking for changes"
 
     # This ensures that when we compare, the file is normalized compared to what we will generate
@@ -114,7 +110,7 @@ foreach ($solution in $solutionsConfig.solutions) {
     } else {
         Format-AlmLogLine -SolutionName $solutionName -Phase Compare -Text "##[debug]Changes detected`n$gitStatus" | ForEach-Object { Write-Host $_ }
 
-        if ((Test-Path "$TempDirectory/$solutionName-managed.old.zip")) {       
+        if ((Test-Path "$TempDirectory/$solutionName-managed.old.zip")) {
             Compress-DataverseSolutionFile -PackageType Managed -OutputPath "$TempDirectory/$solutionName-managed.new.zip" -Path "$SourceDirectory/solutions/$solutionName"
 
             $changesareadditive = (Compare-DataverseSolutionComponents -FileToFile -SolutionFile "$TempDirectory/$solutionName-managed.new.zip" -TargetSolutionFile "$TempDirectory/$solutionName-managed.old.zip" -TestIfAdditive -Verbose)
@@ -133,16 +129,37 @@ foreach ($solution in $solutionsConfig.solutions) {
         [xml]$solutionXml = Get-Content -Path $solutionXmlPath
         $currentVersion = [version] $solutionXml.ImportExportXml.SolutionManifest.Version
 
-        if ($changesareadditive) {
-            $newversion = [version] "$($currentVersion.Major).$($currentVersion.Minor).$([Math]::Max(0, $currentVersion.Build)).$([Math]::Max(0, $currentVersion.Revision) + 1)"
-        } else {
-            $newversion = [version] "$($currentVersion.Major).$([Math]::Max(0, $currentVersion.Minor)+1).0.0"
-
+        $baseMatches = $currentVersion.Major -eq $branchBaseVersion.Major -and
+            [Math]::Max(0, $currentVersion.Build) -eq $branchBaseVersion.Build
+        if ($baseMatches) {
+            $versionBeforeIncrement = [version]::new(
+                $branchBaseVersion.Major,
+                [Math]::Max(0, $currentVersion.Minor),
+                $branchBaseVersion.Build,
+                [Math]::Max(0, $currentVersion.Revision)
+            )
         }
+        else {
+            Write-Host "##[debug][$solutionName][Version] Resetting solution version to branch base $($branchBaseVersion.Major).$($branchBaseVersion.Build)"
+            $versionBeforeIncrement = [version]::new(
+                $branchBaseVersion.Major,
+                0,
+                $branchBaseVersion.Build,
+                0
+            )
+        }
+
+        $newversion = Get-NextAlmSolutionVersion -Version $versionBeforeIncrement -IsAdditive $changesareadditive
+        $newversion = Register-AlmSolutionVersion `
+            -RepositoryPath $SourceDirectory `
+            -SolutionName $solutionName `
+            -Version $newversion `
+            -IsAdditive $changesareadditive
+
         $solutionXml.ImportExportXml.SolutionManifest.Version = $newversion.ToString()
         $solutionXml.Save($solutionXmlPath)
 
-        Write-Host "##[debug][$solutionName][Version] Updated solution folder to $newversion"
+        Write-Host "##[debug][$solutionName][Version] Reserved and updated solution folder to $newversion"
 
         if ($null -ne $exportPipeline) {
             $exportPipeline.OperationBudget.Wait($exportPipeline.Cancellation.Token)
@@ -152,52 +169,30 @@ foreach ($solution in $solutionsConfig.solutions) {
         Write-Host "##[debug][$solutionName][Version] Updated environment to $newversion"
     }
 
- 
-    
     Write-Host "[$solutionName][Compare] Completed"
-    if ($null -ne $exportPipeline) {
-        Add-AlmExportValidation -State $exportPipeline -Config $solutionsConfig -Solution $solution -Dependencies $validDependencyNames
-    }
-    $validDependencyNames += $solutionName
 }
 
-if ($null -ne $exportPipeline) {
-    Complete-AlmExportValidation -State $exportPipeline
-    $exportValidationResults = $exportPipeline.ValidationResults
-}
-Invoke-Hooks -HookType "postExport" -BaseDirectory $SourceDirectory -Config $solutionsConfig -LogContext:$false -AdditionalContext @{
+Invoke-Hook -HookType "postExport" -BaseDirectory $SourceDirectory -Config $solutionsConfig -LogContext:$false -AdditionalContext @{
     SourceDirectory = $SourceDirectory
     ArtifactStagingDirectory = $ArtifactStagingDirectory
     TempDirectory = $TempDirectory
     EnvironmentName = $EnvironmentName
-    ExportValidationResults = $exportValidationResults
-    ExportValidationSummaries = $exportValidationSummaries
-    ExportOperationBudget = $exportOperationBudget
-    ExportCancellationToken = $exportCancellationToken
 }
 $exportStatus = 'Succeeded'
 } finally {
     if ($null -ne $exportPipeline) { Stop-AlmExportPipeline -State $exportPipeline }
-    elseif ($null -ne $exportOperationBudget) { $exportOperationBudget.Dispose() }
     New-Item -ItemType Directory -Path $exportLogDirectory -Force | Out-Null
     $summary = @(foreach ($solution in $solutionsConfig.solutions) {
         $name = $solution.name
         $timings = @()
         if ($null -ne $exportPipeline) { $timings = @($exportPipeline.Timings | Where-Object SolutionName -eq $name) }
-        $validation = $exportValidationSummaries[$name]
-        $validationTiming = @($timings | Where-Object Kind -eq 'Validation')
-        $exportTimings = @($timings | Where-Object Kind -eq 'Export')
         $row = [pscustomobject]@{
             Solution = $name
             RunStatus = $exportStatus
-            PackagesCompleted = $(if ($null -ne $exportPipeline) { $exportTimings.Count } else { $null })
-            ExportSpanSeconds = $(if ($exportTimings.Count) { (($exportTimings.Finished | Sort-Object | Select-Object -Last 1) - ($exportTimings.Started | Sort-Object | Select-Object -First 1)).TotalSeconds } else { $null })
-            Validation = $(if ($null -ne $validation) { $validation.Status } else { 'NotReported' })
-            Errors = $(if ($null -ne $validation) { $validation.Errors } else { $null })
-            Warnings = $(if ($null -ne $validation) { $validation.Warnings } else { $null })
-            ValidationSeconds = $(if ($validationTiming.Count) { ($validationTiming[0].Finished-$validationTiming[0].Started).TotalSeconds } elseif ($null -ne $validation) { $validation.Seconds } else { $null })
+            PackagesCompleted = $(if ($null -ne $exportPipeline) { $timings.Count } else { $null })
+            ExportSpanSeconds = $(if ($timings.Count) { (($timings.Finished | Sort-Object | Select-Object -Last 1) - ($timings.Started | Sort-Object | Select-Object -First 1)).TotalSeconds } else { $null })
         }
-        Write-Host "[$name][Summary] Run=$exportStatus; validation=$($row.Validation); errors=$($row.Errors); warnings=$($row.Warnings); export span=$($row.ExportSpanSeconds)s; validation=$($row.ValidationSeconds)s"
+        Write-Host "[$name][Summary] Run=$exportStatus; packages=$($row.PackagesCompleted); export span=$($row.ExportSpanSeconds)s"
         $row
     })
     ConvertTo-Json -InputObject $summary -Depth 8 | Set-Content -LiteralPath (Join-Path $exportLogDirectory 'summary.json') -Encoding utf8
@@ -213,9 +208,5 @@ $exportClock.Stop()
 if ($PassThru) {
     $workerTimings = @()
     if ($null -ne $exportPipeline) { $workerTimings = $exportPipeline.Timings.ToArray() }
-    [pscustomobject]@{
-        Parallel = $exportSettings.parallel
-        TotalSeconds = $exportClock.Elapsed.TotalSeconds
-        WorkerTimings = $workerTimings
-    }
+    [pscustomobject]@{ Parallel = $exportSettings.parallel; TotalSeconds = $exportClock.Elapsed.TotalSeconds; WorkerTimings = $workerTimings }
 }
