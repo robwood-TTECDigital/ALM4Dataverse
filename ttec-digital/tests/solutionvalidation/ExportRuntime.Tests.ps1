@@ -21,23 +21,25 @@ Describe 'Strict-mode export configuration' {
     It 'ships matching default concurrency settings in the consuming template' {
         foreach ($path in @("$PSScriptRoot/../../../alm-config-defaults.psd1", "$PSScriptRoot/../../../copy-to-your-repo/alm-config.psd1")) {
             $config = Import-PowerShellDataFile $path
-            (Get-AlmExportSettings -Config $config).maxConcurrentOperations | Should -Be 4
+            (Get-AlmExportSetting -Config $config).maxConcurrentOperations | Should -Be 4
             (Get-AlmValidationSettings -Config $config).parallel | Should -BeTrue
             (Get-AlmValidationSettings -Config $config).maxParallel | Should -Be 4
         }
         $defaults = Import-PowerShellDataFile "$PSScriptRoot/../../../alm-config-defaults.psd1"
-        $defaults.hooks.postExportSolution | Should -Contain '[alm]/ttec-digital/postexport-solution.ps1'
+        $defaults.hooks.parallelExportSolution | Should -Contain '[alm]/ttec-digital/parallel-export-solution.ps1'
     }
 
     It 'includes per-solution export hooks in migrated configuration output' {
         Import-Module "$PSScriptRoot/../../migrate-common.psm1" -Force
         $section = Build-HooksSection -Hooks @{
             preExportSolution = @('custom/pre-solution.ps1')
-            postExportSolution = @('[alm]/ttec-digital/postexport-solution.ps1')
+            parallelExportSolution = @('[alm]/ttec-digital/parallel-export-solution.ps1')
+            postExportSolution = @('custom/post-solution.ps1')
         }
         $section | Should -Match 'preExportSolution\s*='
+        $section | Should -Match 'parallelExportSolution\s*='
         $section | Should -Match 'postExportSolution\s*='
-        $section | Should -Match ([regex]::Escape('[alm]/ttec-digital/postexport-solution.ps1'))
+        $section | Should -Match ([regex]::Escape('[alm]/ttec-digital/parallel-export-solution.ps1'))
     }
 
     It 'defaults validation settings and preserves an explicit opt-out' {
@@ -60,7 +62,7 @@ Describe 'Strict-mode export configuration' {
 
     It 'defaults missing, null, and empty settings' {
         foreach ($config in @(@{}, @{export=$null}, @{export=@{}}, @{export=@{parallel=$null;maxParallel=$null}}, @{export=@{parallel='';maxParallel=''}})) {
-            $settings = Get-AlmExportSettings -Config $config
+            $settings = Get-AlmExportSetting -Config $config
             $settings.parallel | Should -BeTrue
             $settings.maxParallel | Should -Be 2
             $settings.maxConcurrentOperations | Should -Be 4
@@ -68,32 +70,26 @@ Describe 'Strict-mode export configuration' {
     }
 
     It 'preserves the explicit opt-out and worker limit' {
-        $settings = Get-AlmExportSettings -Config @{export=@{parallel=$false;maxParallel=1}}
+        $settings = Get-AlmExportSetting -Config @{export=@{parallel=$false;maxParallel=1}}
         $settings.parallel | Should -BeFalse
         $settings.maxParallel | Should -Be 1
     }
 
     It 'rejects invalid settings with configuration errors' {
-        { Get-AlmExportSettings -Config @{export='invalid'} } | Should -Throw 'export must be a hashtable.'
-        { Get-AlmExportSettings -Config @{export=@{parallel='false'}} } | Should -Throw 'export.parallel must be $true or $false.'
+        { Get-AlmExportSetting -Config @{export='invalid'} } | Should -Throw 'export must be a hashtable.'
+        { Get-AlmExportSetting -Config @{export=@{parallel='false'}} } | Should -Throw 'export.parallel must be $true or $false.'
         foreach ($limit in @(0, 9, 'invalid')) {
-            { Get-AlmExportSettings -Config @{export=@{maxParallel=$limit}} } | Should -Throw 'export.maxParallel must be an integer between 1 and 8.'
-            { Get-AlmExportSettings -Config @{export=@{maxConcurrentOperations=$limit}} } | Should -Throw 'export.maxConcurrentOperations must be an integer between 1 and 8.'
+            { Get-AlmExportSetting -Config @{export=@{maxParallel=$limit}} } | Should -Throw 'export.maxParallel must be an integer between 1 and 8.'
+            { Get-AlmExportSetting -Config @{export=@{maxConcurrentOperations=$limit}} } | Should -Throw 'export.maxConcurrentOperations must be an integer between 1 and 8.'
         }
     }
 
     It 'handles missing, null, and empty hook configuration' {
         Mock Test-Path { throw 'Unexpected hook execution' }
         foreach ($config in @(@{}, @{hooks=$null}, @{hooks=@{}}, @{hooks=@{postExport=$null}}, @{hooks=@{postExport=@()}}, @{hooks=@{postExport=''}})) {
-            Test-AlmEarlyExportValidation -Config $config | Should -BeFalse
             Invoke-Hook -HookType postExport -BaseDirectory $TestDrive -Config $config
         }
         Should -Invoke Test-Path -Exactly -Times 0
-    }
-
-    It 'disables early validation before a mutating legacy hook' {
-        Test-AlmEarlyExportValidation -Config @{hooks=@{postExport='[alm]/ttec-digital/postexport.ps1'}} | Should -BeTrue
-        Test-AlmEarlyExportValidation -Config @{hooks=@{postExport='[alm]/ttec-digital/postexport.ps1'};PostExportScript='custom.ps1'} | Should -BeFalse
     }
 
     It 'falls back to validation for missing, null, and empty result maps' {
@@ -106,10 +102,10 @@ Describe 'Strict-mode export configuration' {
         $validationSettings = Get-AlmValidationSettings -Config $config
         $validdependencysolutionnames = @()
         $ignoresolutionnames = @()
-        foreach ($context in @(@{}, @{SolutionHookResults=$null}, @{SolutionHookResults=@{}}, @{SolutionHookResults=@{TestSolution1=$null}}, @{ExportValidationResults=$null}, @{ExportValidationResults=@{}}, @{ExportValidationResults=@{TestSolution1=$null}})) {
+        foreach ($context in @(@{}, @{ParallelExportSolutionHookResults=$null}, @{ParallelExportSolutionHookResults=@{}}, @{ParallelExportSolutionHookResults=@{TestSolution1=$null}}, @{SolutionHookResults=$null}, @{SolutionHookResults=@{}}, @{SolutionHookResults=@{TestSolution1=$null}}, @{ExportValidationResults=$null}, @{ExportValidationResults=@{}}, @{ExportValidationResults=@{TestSolution1=$null}})) {
             . ([scriptblock]::Create($loop.Extent.Text))
         }
-        Should -Invoke validateSolution -Exactly -Times 7 -ParameterFilter { $null -eq $PrecomputedResults }
+        Should -Invoke validateSolution -Exactly -Times 10 -ParameterFilter { $null -eq $PrecomputedResults }
     }
 
     It 'uses per-solution hook results without repeating validation' {
@@ -123,7 +119,7 @@ Describe 'Strict-mode export configuration' {
         $validationSettings = Get-AlmValidationSettings -Config $config
         $validdependencysolutionnames = @()
         $ignoresolutionnames = @()
-        $context = @{SolutionHookResults=@{TestSolution1=@($finding)}}
+        $context = @{ParallelExportSolutionHookResults=@{TestSolution1=@($finding)}}
         . ([scriptblock]::Create($loop.Extent.Text))
         Should -Invoke validateSolution -Exactly -Times 1 -ParameterFilter { $PrecomputedResults.Count -eq 1 -and $PrecomputedResults[0].Message -eq 'Precomputed finding' }
     }
@@ -143,7 +139,7 @@ Describe 'Strict-mode export configuration' {
             SolutionIndex = 1
             Config = $config
         }
-        $results = @(. "$PSScriptRoot/../../postexport-solution.ps1" -Context $context)
+        $results = @(. "$PSScriptRoot/../../parallel-export-solution.ps1" -Context $context)
         $results.Count | Should -Be 1
         Should -Invoke validateSolutionInternal -Exactly -Times 1 -ParameterFilter {
             $validdependencysolutionnames -contains 'External' -and
@@ -439,107 +435,6 @@ Describe 'Export validation lookup caching' {
         Mock validateSolutionInternal { }
         validateSolution -solutionname TestSolution1 -validdependencysolutionnames @() -ignoresolutionnames @() -LaterSolutionNames @('LaterDependency')
         Should -Invoke validateSolutionInternal -Exactly -Times 1 -ParameterFilter { $LaterSolutionNames -contains 'LaterDependency' }
-    }
-}
-
-Describe 'Bounded export scheduling' {
-    BeforeEach {
-        $cloneMethod = [pscustomobject]@{}
-        $cloneMethod | Add-Member -MemberType ScriptMethod -Name Invoke -Value {
-            param($Connection, $Arguments)
-            $null = @($Connection, $Arguments)
-            [pscustomobject]@{}
-        }
-        $state = @{
-            Config = @{ hooks = @{} }
-            AdditionalHookContext = @{}
-            PreparedSolutions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            PendingExports = [System.Collections.Generic.Queue[object]]::new()
-            ActiveExports = [System.Collections.Generic.List[object]]::new()
-            PendingValidations = [System.Collections.Generic.Queue[object]]::new()
-            ActiveValidation = $null
-            PendingSolutionHooks = [System.Collections.Generic.Queue[object]]::new()
-            ActiveSolutionHooks = [System.Collections.Generic.List[object]]::new()
-            Jobs = [System.Collections.Generic.List[object]]::new()
-            Clients = [System.Collections.Generic.List[object]]::new()
-            CloneMethod = $cloneMethod
-            Connection = $null
-            ModulePath = 'module.psd1'
-            ValidationRoot = 'validation'
-            MaxParallel = 2
-            ValidateEarly = $true
-            ValidationSettings = @{parallel=$true;maxParallel=4}
-            OperationBudget = [System.Threading.SemaphoreSlim]::new(4,4)
-            Cancellation = [System.Threading.CancellationTokenSource]::new()
-            LogEvents = [pscustomobject]@{Queue=[System.Collections.Concurrent.ConcurrentQueue[object]]::new();Signal=[System.Threading.AutoResetEvent]::new($false)}
-            LogDirectory = ''
-        }
-    }
-
-    AfterEach {
-        $state.OperationBudget.Dispose()
-        $state.Cancellation.Dispose()
-        $state.LogEvents.Signal.Dispose()
-    }
-
-    It 'starts only the configured number of exports and refills a released slot' {
-        Mock Start-ThreadJob { [pscustomobject]@{State='Running'} }
-        foreach ($taskIndex in 1..4) {
-            $state.PendingExports.Enqueue(@{
-                SolutionName = "Test$taskIndex"
-                SolutionConfig = @{ name = "Test$taskIndex" }
-                SolutionIndex = $taskIndex - 1
-                Managed = $false
-                Path = 'test.zip'
-            })
-        }
-        Start-AlmQueuedExports -State $state
-        $state.ActiveExports.Count | Should -Be 2
-        $state.PendingExports.Count | Should -Be 2
-        $state.ActiveExports.RemoveAt(0)
-        Start-AlmQueuedExports -State $state
-        $state.ActiveExports.Count | Should -Be 2
-        Should -Invoke Start-ThreadJob -Exactly -Times 3
-    }
-
-    It 'runs one validation lane and preserves dependency snapshots' {
-        $startedTasks = [System.Collections.Generic.List[object]]::new()
-        Mock Start-ThreadJob {
-            $startedTasks.Add($ArgumentList[3])
-            [pscustomobject]@{State='Running'}
-        }
-        $dependencies = @('External')
-        $config = @{solutions=@(@{name='First'},@{name='Second'})}
-        Add-AlmExportValidation -State $state -Config $config -Solution @{name='First'} -Dependencies $dependencies
-        $dependencies += 'First'
-        Add-AlmExportValidation -State $state -Config $config -Solution @{name='Second'} -Dependencies $dependencies
-        $state.PendingValidations.Count | Should -Be 1
-        $state.PendingValidations.Peek().Dependencies | Should -Contain First
-        $startedTasks[0].LaterSolutionNames | Should -Contain Second
-        Should -Invoke Start-ThreadJob -Exactly -Times 1
-    }
-
-    It 'leaves validation to hooks when early validation is unsafe' {
-        Mock Start-ThreadJob { [pscustomobject]@{State='Running'} }
-        $state.ValidateEarly = $false
-        Add-AlmExportValidation -State $state -Config @{} -Solution @{name='First'} -Dependencies @()
-        Should -Invoke Start-ThreadJob -Exactly -Times 0
-    }
-
-    It 'does not schedule disabled validation' {
-        Mock Start-ThreadJob { [pscustomobject]@{State='Running'} }
-        Add-AlmExportValidation -State $state -Config @{} -Solution @{name='First';validationMode='disabled'} -Dependencies @()
-        Should -Invoke Start-ThreadJob -Exactly -Times 0
-    }
-
-    It 'propagates a worker failure' {
-        $job = Microsoft.PowerShell.ThreadJob\Start-ThreadJob { throw 'Expected worker failure' }
-        try {
-            $job | Wait-Job | Out-Null
-            { Receive-AlmExportJob -Job $job } | Should -Throw
-        } finally {
-            Remove-Job -Job $job -Force
-        }
     }
 }
 

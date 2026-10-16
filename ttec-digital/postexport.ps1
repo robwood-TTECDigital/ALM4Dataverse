@@ -134,7 +134,9 @@ foreach ($solutionconfig in $config.solutions) {
         $validationParameters.LogDirectory = Join-Path $context['ArtifactStagingDirectory'] "export-logs/$($solutionconfig.name)"
     }
     $precomputedResults = $null
-    if ($context.ContainsKey('SolutionHookResults') -and $context['SolutionHookResults'] -is [hashtable] -and $context['SolutionHookResults'].ContainsKey($solutionconfig.name) -and $null -ne $context['SolutionHookResults'][$solutionconfig.name]) {
+    if ($context.ContainsKey('ParallelExportSolutionHookResults') -and $context['ParallelExportSolutionHookResults'] -is [hashtable] -and $context['ParallelExportSolutionHookResults'].ContainsKey($solutionconfig.name) -and $null -ne $context['ParallelExportSolutionHookResults'][$solutionconfig.name]) {
+        $precomputedResults = $context['ParallelExportSolutionHookResults'][$solutionconfig.name]
+    } elseif ($context.ContainsKey('SolutionHookResults') -and $context['SolutionHookResults'] -is [hashtable] -and $context['SolutionHookResults'].ContainsKey($solutionconfig.name) -and $null -ne $context['SolutionHookResults'][$solutionconfig.name]) {
         $precomputedResults = $context['SolutionHookResults'][$solutionconfig.name]
     } elseif ($context.ContainsKey('ExportValidationResults') -and $context['ExportValidationResults'] -is [hashtable] -and $context['ExportValidationResults'].ContainsKey($solutionconfig.name) -and $null -ne $context['ExportValidationResults'][$solutionconfig.name]) {
         $precomputedResults = $context['ExportValidationResults'][$solutionconfig.name]

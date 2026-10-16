@@ -7,9 +7,10 @@
         postExport = @(
             "[alm]/ttec-digital/postexport.ps1"
         )
-        postExportSolution = @(
-            "[alm]/ttec-digital/postexport-solution.ps1"
+        parallelExportSolution = @(
+            "[alm]/ttec-digital/parallel-export-solution.ps1"
         )
+        postExportSolution = @()
         preDeploy  = @(
             "[alm]/ttec-digital/predeploy.ps1"
         )
@@ -44,7 +45,7 @@
         branches = @{}
     }
 
-    # Package exports and version updates share an operation budget; hooks do not.
+    # Package exports and version updates share a budget; parallel per-solution hooks can join it.
     # Both integer limits accept 1..8; parallel = $false retains sequential export.
     export = @{
         parallel = $true

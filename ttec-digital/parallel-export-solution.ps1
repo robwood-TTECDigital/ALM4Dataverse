@@ -4,19 +4,19 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
 if ($context -isnot [hashtable]) {
-    throw 'The postExportSolution validation hook requires a hashtable context.'
+    throw 'The parallelExportSolution validation hook requires a hashtable context.'
 }
 if (-not $context.ContainsKey('SolutionName') -or -not $context['SolutionName']) {
-    throw 'The postExportSolution validation hook requires SolutionName.'
+    throw 'The parallelExportSolution validation hook requires SolutionName.'
 }
 if (-not $context.ContainsKey('SolutionConfig') -or $context['SolutionConfig'] -isnot [hashtable]) {
-    throw 'The postExportSolution validation hook requires SolutionConfig.'
+    throw 'The parallelExportSolution validation hook requires SolutionConfig.'
 }
 if (-not $context.ContainsKey('SolutionIndex')) {
-    throw 'The postExportSolution validation hook requires SolutionIndex.'
+    throw 'The parallelExportSolution validation hook requires SolutionIndex.'
 }
 if (-not $context.ContainsKey('Config') -or $context['Config'] -isnot [hashtable]) {
-    throw 'The postExportSolution validation hook requires Config.'
+    throw 'The parallelExportSolution validation hook requires Config.'
 }
 
 . (Join-Path $PSScriptRoot 'common/solutionvalidation.ps1')

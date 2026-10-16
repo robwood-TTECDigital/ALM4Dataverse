@@ -69,10 +69,11 @@ function Build-HooksSection {
     [void]$sb.AppendLine()
     
     # Build each hook section
-    $hookNames = @('preExport', 'preExportSolution', 'postExportSolution', 'postExport', 'preDeploy', 'postDeploy', 'preBuild', 'postBuild', 'dataMigrations')
+    $hookNames = @('preExport', 'preExportSolution', 'parallelExportSolution', 'postExportSolution', 'postExport', 'preDeploy', 'postDeploy', 'preBuild', 'postBuild', 'dataMigrations')
     $hookComments = @{
         'preExport'      = '# Called by `pipelines/scripts/export.ps1` before exporting solutions.'
         'preExportSolution' = '# Called by `pipelines/scripts/export.ps1` before exporting each solution.'
+        'parallelExportSolution' = '# Runs alongside each solution export and completes before unpacking.'
         'postExportSolution' = '# Called after each solution is unpacked and compared; can overlap remaining exports.'
         'postExport'     = '# Called by `pipelines/scripts/export.ps1` after exporting/unpacking/version bump logic.'
         'preDeploy'      = '# Called by `pipelines/scripts/deploy.ps1` before staging/importing solutions.'
