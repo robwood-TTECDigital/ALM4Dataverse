@@ -95,12 +95,6 @@
         maxConcurrentOperations = 4
     }
 
-    # Maximum number of custom EXPORT validation rules to run concurrently.
-    validation = @{
-        parallel = $true
-        maxParallel = 4
-    }
-
     # Build-command and packing stages each use maxParallel (1..8), independently
     # of solutionCheck.maxParallel. parallel = $false makes both stages sequential.
     build = @{

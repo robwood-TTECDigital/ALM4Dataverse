@@ -1,7 +1,6 @@
 BeforeAll {
     $repoRoot = Split-Path $PSScriptRoot -Parent
     $script:exportScript = Join-Path $repoRoot 'pipelines/scripts/export.ps1'
-    . (Join-Path $repoRoot 'pipelines/scripts/common.ps1')
     # Snapshot generated XML and mapping/pathspec calls inside the mocks: export deletes its
     # mapping files on return. Reset the shared capture below to isolate each regression case.
     if (-not ('AlmExportMappingTestCapture' -as [type])) {
@@ -72,7 +71,6 @@ Describe 'Export and version changes' {
         Mock Set-DataverseSolution {}
         Mock Register-AlmSolutionVersion { $Version }
         Mock git { ' M solutions/Example/Other/Solution.xml' }
-        Mock Invoke-Hook {}
         $script:capturedWarnings = @()
         [AlmExportMappingTestCapture]::MappingPath = $null
         [AlmExportMappingTestCapture]::MappingXml = $null

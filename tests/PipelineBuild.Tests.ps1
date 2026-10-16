@@ -1,7 +1,6 @@
 BeforeAll {
     $repoRoot = Split-Path $PSScriptRoot -Parent
     $script:buildScript = Join-Path $repoRoot 'pipelines/scripts/build.ps1'
-    . (Join-Path $repoRoot 'pipelines/scripts/common.ps1')
     # Capture XML during packing: production removes the generated mapping file before
     # assertions run, so retaining its path alone cannot verify directives or escaping.
     if (-not ('AlmBuildMappingTestCapture' -as [type])) {
@@ -61,7 +60,6 @@ Describe 'Build artifacts and solution-check helpers' {
 '@
         $env:GITHUB_STEP_SUMMARY = Join-Path $fixtureRoot 'job-summary.md'
         $env:TF_BUILD = 'True'
-        Mock Invoke-Hook {}
         Mock Compress-DataverseSolutionFile {
             if (-not [string]::IsNullOrWhiteSpace($MappingFile)) {
                 [AlmBuildMappingTestCapture]::MappingPath = $MappingFile

@@ -7,7 +7,6 @@ BeforeAll {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Mock command signature; Pester inspects these arguments.')]
         [CmdletBinding()]
         param($InFile, $Mode, $TimeoutSeconds, $EnvironmentVariables, $ConnectionReferences,
-            [switch]$PublishWorkflows,
             [switch]$OverwriteUnmanagedCustomizations, [switch]$SkipIfSameVersion,
             [switch]$UseUpdateIfVersionMajorMinorMatches)
     }
@@ -58,7 +57,6 @@ Describe 'Deployment options' {
         $script:savedCustomUpn = $env:CUSTOMUPN
         $env:DATAVERSESERVICEACCOUNTUPN = 'default@example.com'
         $env:CUSTOMUPN = 'custom@example.com'
-        Mock Invoke-Hook {}
         Mock Import-DataverseSolution {}
         Mock Invoke-DataverseSolutionUpgrade {}
         Mock Publish-DataverseCustomizations {}
@@ -83,7 +81,7 @@ Describe 'Deployment options' {
         Write-DeploymentConfig -Settings $Settings
         & $script:deployScript -ArtifactsPath $TestDrive
         Should -Invoke Import-DataverseSolution -Times 1 -Exactly -ParameterFilter {
-            $InFile -like '*Example_managed.zip' -and $Mode -eq 'Auto' -and $PublishWorkflows
+            $InFile -like '*Example_managed.zip' -and $Mode -eq 'Auto'
         }
     }
 

@@ -203,12 +203,5 @@
             Source = 'Set-DataverseSolution'
             Reason = 'An empty local command stub for Pester mocks; it performs no Dataverse request or mutation.'
         }
-        @{
-            Path = '.github/scripts/test-deployment-options.ps1'
-            Rule = 'PSUseSingularNouns'
-            Function = 'Merge-SecretsJsonInputs'
-            Source = 'function Merge-SecretsJsonInputs {'
-            Reason = 'The generated deployment workflow calls this test stub by its plural function name.'
-        }
     )
 }

@@ -1,37 +1,5 @@
-# Dataverse-ALM
+# ALM4Dataverse
 
-## TTEC Digital fork of ALM4Dataverse
-
-This repo contains a TTEC Digital custom fork of the ALM4Dataverse OSS project.
-See the main content from that project below for info on the bulk of what this does.
-
-This fork adds:
-
-- backwards compatibility with the previous Dataverse-ALM implementation and a migration process to assist with updating configuration.
-- TTEC Digital proprietary extensions:
-  - Solution validation rules
-  - Azure Synapse component management
-  - Schema migration tracking.
-
-Upstream ALM4Dataverse now includes GitHub Actions support. The older fork-specific GitHub workflow model is deprecated.
-See `ttec-digital/docs/github-actions-setup.md` for migration guidance if you previously adopted the fork GitHub setup.
-
-See the docs in `ttec-digital/docs` for further info on these features.
-
-## Upgrading from v1
-
-1. Clone your repo to a local workspace.
-
-2. Run `ttec-digital/migrate-azdo-repo.ps1` for Azure DevOps based repos. If you were using the older fork-specific GitHub Actions support, use `ttec-digital/migrate-github-repo.ps1` and then follow `ttec-digital/docs/github-actions-setup.md` to complete the move to the upstream GitHub workflow model.
-
-3. Any custom pre/post X scripts may need to adapt slightly:
-
-- Scripts require `context` parameter instead of individual parameters. See the config docs.
-- Put PowerShell module requirements into `alm-config.psd1` and remove any commands to install and load them.
-
-1. Commit and push the changes back up to the remote.
-
----
 ![ALM4Dataverse](logo.png)
 
 Source-controlled application lifecycle management for Microsoft Dataverse, using
@@ -73,8 +41,6 @@ and environment-specific values are supplied at runtime.
 - PowerShell hooks for configuration data, schema migrations, organization settings, and other build/export/deployment tasks.
 - Pinned module/PAC dependencies, cache-aware installation, and a per-build dependency lock.
 - Optional PAC Solution Checker and deployment validation, including a retained release or last-deployed environment baseline.
-- Branch-specific development and promotion workflows, with platform-specific approval, permission, and concurrency controls.
-- GitHub Release assets, ordered manual promotion or environment protection, deployment pointers, and branch-aware Release cleanup.
 - Branch-specific development and deployment workflows, with platform-specific approval, permission, and concurrency controls.
 - Branch-suffixed GitHub BUILD releases, deployment pointers, and branch-aware Release cleanup.
 
@@ -156,6 +122,7 @@ extensions, service connections, target settings, and pipeline resource permissi
 - [Frequently asked questions](docs/faqs.md)
 - [Maintainer guide](docs/maintainers.md): tests, dependency updates, and shared releases.
 - [Maintainer scripts and checks](.github/scripts/README.md)
+
 ## Contributing
 
 See [PowerShell Development](docs/development/powershell.md) for local checks,

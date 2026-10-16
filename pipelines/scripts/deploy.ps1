@@ -119,7 +119,6 @@ foreach ($solution in $solutions) {
         -Verbose `
         -InFile $solution.File `
         -Mode $mode `
-        -PublishWorkflows `
         -TimeoutSeconds $importTimeoutSeconds `
         -EnvironmentVariables $environmentVariables `
         -ConnectionReferences $connectionReferences `
