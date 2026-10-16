@@ -13,6 +13,8 @@ The validation process:
 2. Executes all enabled validation rules against the environment
 3. Reports any violations as pipeline errors or warnings
 
+Validation runs in the `postExportSolution` hook after each solution has been unpacked and compared. With parallel export enabled, the validation for a completed solution can run while later solutions are still exporting. The global post-export hook then reports the collected findings without repeating the checks.
+
 Rules run in parallel by default, with up to four rules at once configured by `validation.maxParallel`; set `validation.parallel = $false` for sequential rules. Validation still runs for unchanged solutions and respects existing error, warning and disabled settings, including rule and component overrides.
 
 Validation can overlap solution exports, subject to the shared `export.maxConcurrentOperations` limit (default `4`). Status messages identify the solution and rule, and findings are reported in rule order. Rule execution errors appear directly in the standard log with a solution/rule prefix. Detailed logs and findings are retained in the `export-logs` artifact directory, with a final per-solution summary. See [Export Processing](../../docs/config/alm-config.md#export-processing) for concurrency settings and [Export Logs](../../docs/usage/exporting-changes.md#export-logs) for log formats and artifacts.

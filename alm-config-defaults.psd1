@@ -3,8 +3,12 @@
     # appends arrays. Keep shared defaults here rather than in copied repositories.
     hooks = @{
         preExport  = @()
+        preExportSolution = @()
         postExport = @(
             "[alm]/ttec-digital/postexport.ps1"
+        )
+        postExportSolution = @(
+            "[alm]/ttec-digital/postexport-solution.ps1"
         )
         preDeploy  = @(
             "[alm]/ttec-digital/predeploy.ps1"

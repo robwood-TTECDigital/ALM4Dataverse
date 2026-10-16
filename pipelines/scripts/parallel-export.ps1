@@ -298,7 +298,8 @@ function Update-AlmExportValidation {
             Send-AlmWorkerEvent -Events $Events -SolutionName $Task.SolutionName -Phase Validate -Message 'Started'
             $results = @(validateSolutionInternal -solutionname $Task.SolutionName -solutionconfig $Task.Config `
                 -validdependencysolutionnames $Task.Dependencies -ignoresolutionnames $Task.IgnoreSolutions -validationMode $Task.Mode `
-                -ParallelRules:$Settings.parallel -MaxParallel $Settings.maxParallel -OperationBudget $Budget -CancellationToken $Cancellation -LogEvents $Events -LogDirectory $solutionLogs -RuleTimings $ruleTimings)
+                -ParallelRules:$Settings.parallel -MaxParallel $Settings.maxParallel -OperationBudget $Budget -CancellationToken $Cancellation -LogEvents $Events -LogDirectory $solutionLogs -RuleTimings $ruleTimings `
+                -LaterSolutionNames $Task.LaterSolutionNames)
             Send-AlmWorkerEvent -Events $Events -SolutionName $Task.SolutionName -Phase Validate -Message "Completed; $($results.Count) finding(s)"
             [pscustomobject]@{ Kind = 'Validation'; SolutionName = $Task.SolutionName; Results = $results; Started = $started; Finished = [datetime]::UtcNow; RuleTimings = $ruleTimings.ToArray() }
         }
@@ -433,10 +434,20 @@ function Add-AlmExportValidation {
     if ($Config.ContainsKey('IgnoreSolutions')) {
         $ignoreSolutions = @($Config['IgnoreSolutions'] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
     }
+    $laterSolutionNames = @()
+    $foundCurrentSolution = $false
+    foreach ($configuredSolution in $Config.solutions) {
+        if ($foundCurrentSolution) {
+            $laterSolutionNames += $configuredSolution.name
+        } elseif ($configuredSolution.name -eq $Solution.name) {
+            $foundCurrentSolution = $true
+        }
+    }
     $State.PendingValidations.Enqueue(@{
         SolutionName = $Solution.name
         Config = $Solution
         Dependencies = @($Dependencies)
+        LaterSolutionNames = @($laterSolutionNames)
         IgnoreSolutions = $ignoreSolutions
         Mode = $mode
     })
@@ -606,10 +617,9 @@ function Stop-AlmExportPipeline {
             if ($job.HasMoreData) {
                 try {
                     $result = Receive-AlmExportJob -Job $job -LogDirectory $State.LogDirectory
-                    $State.Timings.Add($result)
-                } catch {
-                    Write-Host ([string]$_)
+                    if ($result.Kind -in @('Export', 'Validation')) { $State.Timings.Add($result) }
                 }
+                catch { Write-Host ([string]$_) }
             }
             Remove-Job -Job $job -Force
         }

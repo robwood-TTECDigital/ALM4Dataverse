@@ -69,9 +69,11 @@ function Build-HooksSection {
     [void]$sb.AppendLine()
     
     # Build each hook section
-    $hookNames = @('preExport', 'postExport', 'preDeploy', 'postDeploy', 'preBuild', 'postBuild', 'dataMigrations')
+    $hookNames = @('preExport', 'preExportSolution', 'postExportSolution', 'postExport', 'preDeploy', 'postDeploy', 'preBuild', 'postBuild', 'dataMigrations')
     $hookComments = @{
         'preExport'      = '# Called by `pipelines/scripts/export.ps1` before exporting solutions.'
+        'preExportSolution' = '# Called by `pipelines/scripts/export.ps1` before exporting each solution.'
+        'postExportSolution' = '# Called after each solution is unpacked and compared; can overlap remaining exports.'
         'postExport'     = '# Called by `pipelines/scripts/export.ps1` after exporting/unpacking/version bump logic.'
         'preDeploy'      = '# Called by `pipelines/scripts/deploy.ps1` before staging/importing solutions.'
         'postDeploy'     = '# Called by `pipelines/scripts/deploy.ps1` after publish customizations.'
@@ -84,7 +86,7 @@ function Build-HooksSection {
     foreach ($hookName in $hookNames) {
         [void]$sb.AppendLine("        $($hookComments[$hookName])")
         
-        $padding = ' ' * (15 - $hookName.Length)
+        $padding = ' ' * [Math]::Max(1, 15 - $hookName.Length)
         [void]$sb.Append("        $hookName$padding = @(")
         
         if ($Hooks.ContainsKey($hookName) -and $Hooks[$hookName] -and $Hooks[$hookName].Count -gt 0) {

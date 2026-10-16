@@ -316,7 +316,8 @@ function validateSolution(
     [string]$LogDirectory = '',
     [hashtable]$SummaryStore = @{},
     [System.Threading.SemaphoreSlim]$OperationBudget,
-    [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
+    [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None,
+    [Parameter()][AllowEmptyCollection()][string[]]$LaterSolutionNames = @()
 ) {
 
 <#
@@ -384,7 +385,8 @@ function validateSolution(
             -ignoresolutionnames:$ignoresolutionnames `
             -solutionconfig:$solutionconfig `
             -validationMode:$validationMode -ParallelRules:$ValidationSettings.parallel -MaxParallel $ValidationSettings.maxParallel `
-            -LogDirectory $LogDirectory -RuleTimings $ruleTimings -OperationBudget $OperationBudget -CancellationToken $CancellationToken
+            -LogDirectory $LogDirectory -RuleTimings $ruleTimings -OperationBudget $OperationBudget -CancellationToken $CancellationToken `
+            -LaterSolutionNames $LaterSolutionNames
     }
     $results | foreach-object {
         # Results from validation rules are objects with Message and IsWarning properties
@@ -531,7 +533,8 @@ function validateSolutionInternal(
     [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None,
     $LogEvents,
     [string]$LogDirectory = '',
-    [System.Collections.Generic.List[object]]$RuleTimings
+    [System.Collections.Generic.List[object]]$RuleTimings,
+    [Parameter()][AllowEmptyCollection()][string[]]$LaterSolutionNames = @()
 ) {   
 
     $script:componentDefinitionCache = @{}
@@ -545,6 +548,7 @@ function validateSolutionInternal(
         ignoresolutionnames          = $ignoresolutionnames;
         solutionconfig               = $solutionconfig;
         validationMode               = $validationMode;
+        laterSolutionNames           = @($LaterSolutionNames);
         ComponentDefinitionCache     = @{};
         ComponentNameCache           = @{};
         ruleMode                     = 'error';

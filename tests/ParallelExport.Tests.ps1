@@ -289,6 +289,11 @@ function Invoke-DataverseSQL { param($Connection, $Sql); if ($null -eq $Connecti
         @{ Parallel = $false }
         @{ Parallel = $true }
     ) {
+        Mock Get-AlmConfig {
+            $config = Import-PowerShellDataFile -Path (Join-Path $BaseDirectory 'alm-config.psd1')
+            $config.buildVersion = @{ default = '1.0'; branches = @{} }
+            $config
+        }
         [AlmExportTestClient]::Release.Set()
         $source = Join-Path $script:workerRoot 'source'
         $staging = Join-Path $script:workerRoot 'staging'

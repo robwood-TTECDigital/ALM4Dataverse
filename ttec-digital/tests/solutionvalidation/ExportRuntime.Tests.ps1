@@ -11,7 +11,7 @@ BeforeAll {
         param($TableName, $Id, $Columns, $Top)
         $null = @($TableName, $Id, $Columns, $Top)
     }
-    function Get-DataverseEntityMetadata {
+    Set-Item -Path Function:\Get-DataverseEntityMetadata -Value {
         param($EntityName, [switch]$UseMetadataCache, [switch]$ExcludeAttributes, [switch]$ExcludeRelationships, [switch]$ExcludePrivileges)
         $null = @($EntityName, $UseMetadataCache, $ExcludeAttributes, $ExcludeRelationships, $ExcludePrivileges)
     }
@@ -25,6 +25,19 @@ Describe 'Strict-mode export configuration' {
             (Get-AlmValidationSettings -Config $config).parallel | Should -BeTrue
             (Get-AlmValidationSettings -Config $config).maxParallel | Should -Be 4
         }
+        $defaults = Import-PowerShellDataFile "$PSScriptRoot/../../../alm-config-defaults.psd1"
+        $defaults.hooks.postExportSolution | Should -Contain '[alm]/ttec-digital/postexport-solution.ps1'
+    }
+
+    It 'includes per-solution export hooks in migrated configuration output' {
+        Import-Module "$PSScriptRoot/../../migrate-common.psm1" -Force
+        $section = Build-HooksSection -Hooks @{
+            preExportSolution = @('custom/pre-solution.ps1')
+            postExportSolution = @('[alm]/ttec-digital/postexport-solution.ps1')
+        }
+        $section | Should -Match 'preExportSolution\s*='
+        $section | Should -Match 'postExportSolution\s*='
+        $section | Should -Match ([regex]::Escape('[alm]/ttec-digital/postexport-solution.ps1'))
     }
 
     It 'defaults validation settings and preserves an explicit opt-out' {
@@ -93,10 +106,55 @@ Describe 'Strict-mode export configuration' {
         $validationSettings = Get-AlmValidationSettings -Config $config
         $validdependencysolutionnames = @()
         $ignoresolutionnames = @()
-        foreach ($context in @(@{}, @{ExportValidationResults=$null}, @{ExportValidationResults=@{}}, @{ExportValidationResults=@{TestSolution1=$null}})) {
+        foreach ($context in @(@{}, @{SolutionHookResults=$null}, @{SolutionHookResults=@{}}, @{SolutionHookResults=@{TestSolution1=$null}}, @{ExportValidationResults=$null}, @{ExportValidationResults=@{}}, @{ExportValidationResults=@{TestSolution1=$null}})) {
             . ([scriptblock]::Create($loop.Extent.Text))
         }
-        Should -Invoke validateSolution -Exactly -Times 4 -ParameterFilter { $null -eq $PrecomputedResults }
+        Should -Invoke validateSolution -Exactly -Times 7 -ParameterFilter { $null -eq $PrecomputedResults }
+    }
+
+    It 'uses per-solution hook results without repeating validation' {
+        $tokens = $null
+        $parseErrors = $null
+        $syntaxTree = [System.Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot/../../postexport.ps1", [ref]$tokens, [ref]$parseErrors)
+        $loop = $syntaxTree.FindAll({ param($node) $node -is [System.Management.Automation.Language.ForEachStatementAst] -and $node.Condition.Extent.Text -eq '$config.solutions' }, $true)[0]
+        Mock validateSolution { }
+        $finding = [pscustomobject]@{ Message = 'Precomputed finding'; IsWarning = $false }
+        $config = @{solutions=@(@{name='TestSolution1'})}
+        $validationSettings = Get-AlmValidationSettings -Config $config
+        $validdependencysolutionnames = @()
+        $ignoresolutionnames = @()
+        $context = @{SolutionHookResults=@{TestSolution1=@($finding)}}
+        . ([scriptblock]::Create($loop.Extent.Text))
+        Should -Invoke validateSolution -Exactly -Times 1 -ParameterFilter { $PrecomputedResults.Count -eq 1 -and $PrecomputedResults[0].Message -eq 'Precomputed finding' }
+    }
+
+    It 'validates a solution with the configured dependency order in the per-solution hook' {
+        Mock validateSolutionInternal { [pscustomobject]@{ Message = 'Finding'; IsWarning = $false } }
+        $config = @{
+            solutions = @(@{name='Earlier'}, @{name='Current'}, @{name='Later'})
+            ExternalDependencySolutionNames = @('External')
+            DependencySolutions = @('Shared')
+            IgnoreSolutions = @('Ignored')
+            validation = @{parallel=$false;maxParallel=2}
+        }
+        $context = @{
+            SolutionName = 'Current'
+            SolutionConfig = $config.solutions[1]
+            SolutionIndex = 1
+            Config = $config
+        }
+        $results = @(. "$PSScriptRoot/../../postexport-solution.ps1" -Context $context)
+        $results.Count | Should -Be 1
+        Should -Invoke validateSolutionInternal -Exactly -Times 1 -ParameterFilter {
+            $validdependencysolutionnames -contains 'External' -and
+            $validdependencysolutionnames -contains 'Shared' -and
+            $validdependencysolutionnames -contains 'Earlier' -and
+            $validdependencysolutionnames -notcontains 'Later' -and
+            $LaterSolutionNames -contains 'Later' -and
+            $ignoresolutionnames -contains 'Ignored' -and
+            $ParallelRules -eq $false -and
+            $MaxParallel -eq 2
+        }
     }
 }
 
@@ -376,6 +434,12 @@ Describe 'Export validation lookup caching' {
         @($findings).Count | Should -Be 1
         Should -Invoke validateSolutionInternal -Exactly -Times 0
     }
+
+    It 'passes configured later solutions into validation' {
+        Mock validateSolutionInternal { }
+        validateSolution -solutionname TestSolution1 -validdependencysolutionnames @() -ignoresolutionnames @() -LaterSolutionNames @('LaterDependency')
+        Should -Invoke validateSolutionInternal -Exactly -Times 1 -ParameterFilter { $LaterSolutionNames -contains 'LaterDependency' }
+    }
 }
 
 Describe 'Bounded export scheduling' {
@@ -394,6 +458,8 @@ Describe 'Bounded export scheduling' {
             ActiveExports = [System.Collections.Generic.List[object]]::new()
             PendingValidations = [System.Collections.Generic.Queue[object]]::new()
             ActiveValidation = $null
+            PendingSolutionHooks = [System.Collections.Generic.Queue[object]]::new()
+            ActiveSolutionHooks = [System.Collections.Generic.List[object]]::new()
             Jobs = [System.Collections.Generic.List[object]]::new()
             Clients = [System.Collections.Generic.List[object]]::new()
             CloneMethod = $cloneMethod
@@ -437,13 +503,19 @@ Describe 'Bounded export scheduling' {
     }
 
     It 'runs one validation lane and preserves dependency snapshots' {
-        Mock Start-ThreadJob { [pscustomobject]@{State='Running'} }
+        $startedTasks = [System.Collections.Generic.List[object]]::new()
+        Mock Start-ThreadJob {
+            $startedTasks.Add($ArgumentList[3])
+            [pscustomobject]@{State='Running'}
+        }
         $dependencies = @('External')
-        Add-AlmExportValidation -State $state -Config @{} -Solution @{name='First'} -Dependencies $dependencies
+        $config = @{solutions=@(@{name='First'},@{name='Second'})}
+        Add-AlmExportValidation -State $state -Config $config -Solution @{name='First'} -Dependencies $dependencies
         $dependencies += 'First'
-        Add-AlmExportValidation -State $state -Config @{} -Solution @{name='Second'} -Dependencies $dependencies
+        Add-AlmExportValidation -State $state -Config $config -Solution @{name='Second'} -Dependencies $dependencies
         $state.PendingValidations.Count | Should -Be 1
         $state.PendingValidations.Peek().Dependencies | Should -Contain First
+        $startedTasks[0].LaterSolutionNames | Should -Contain Second
         Should -Invoke Start-ThreadJob -Exactly -Times 1
     }
 
@@ -479,6 +551,7 @@ Describe 'Repeated dependency validation' {
             ignoresolutionnames = @()
             solutionconfig = @{}
             validationMode = 'error'
+            laterSolutionNames = @()
             ruleMode = 'error'
         }
         Mock getComponentNames {
@@ -546,5 +619,166 @@ Describe 'Repeated dependency validation' {
         $findings = @(& "$PSScriptRoot/../../validationrules/DependencyOnSolutionNotAllowed.ps1" $ruleContext)
         $findings.Count | Should -Be 1
         Should -Invoke Invoke-DataverseSQL -Exactly -Times 1 -ParameterFilter { $Sql -match 'WHERE s.solutionid = @requiredBaseSolutionId' }
+    }
+
+    It 'reports Active-based table dependencies when the table is shell and metadata only' {
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                requiredcomponentobjectid = 'active-component'
+                requiredcomponenttype = 1
+                requiredcomponentparentid = $null
+                requiredcomponentbasesolutionid = '00000000-0000-0000-0000-000000000003'
+                dependentcomponentobjectid = 'dependent-entity'
+                dependentcomponenttype = 1
+            }
+        } -ParameterFilter { $Sql -match 'FROM dependency dep' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                SolutionName = 'Active'
+                SolutionId = '00000000-0000-0000-0000-000000000003'
+                Managed = $false
+            }
+        } -ParameterFilter { $Sql -match 'WHERE s.solutionid = @requiredBaseSolutionId' }
+        Mock Invoke-DataverseSQL { } -ParameterFilter { $Sql -match 's.solutionid <> @solutionId' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{ RootComponentBehavior = 1 }
+        } -ParameterFilter { $Sql -match 'SELECT TOP 1 sc.rootcomponentbehavior AS RootComponentBehavior' }
+
+        $findings = @(& "$PSScriptRoot/../../validationrules/DependencyOnSolutionNotAllowed.ps1" $ruleContext)
+
+        $findings.Count | Should -Be 1
+        $findings[0].Message | Should -Match 'depends on solution <Not in any solution>'
+        $findings[0].Message | Should -Not -Match 'SolutionName\s+:\s+Active'
+    }
+
+    It 'does not report Active-based table dependencies when the table includes all objects' {
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                requiredcomponentobjectid = 'active-component'
+                requiredcomponenttype = 1
+                requiredcomponentparentid = $null
+                requiredcomponentbasesolutionid = '00000000-0000-0000-0000-000000000003'
+                dependentcomponentobjectid = 'dependent-entity'
+                dependentcomponenttype = 1
+            }
+        } -ParameterFilter { $Sql -match 'FROM dependency dep' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                SolutionName = 'Active'
+                SolutionId = '00000000-0000-0000-0000-000000000003'
+                Managed = $false
+            }
+        } -ParameterFilter { $Sql -match 'WHERE s.solutionid = @requiredBaseSolutionId' }
+        Mock Invoke-DataverseSQL { } -ParameterFilter { $Sql -match 's.solutionid <> @solutionId' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{ RootComponentBehavior = 0 }
+        } -ParameterFilter { $Sql -match 'SELECT TOP 1 sc.rootcomponentbehavior AS RootComponentBehavior' }
+
+        $findings = @(& "$PSScriptRoot/../../validationrules/DependencyOnSolutionNotAllowed.ps1" $ruleContext)
+
+        $findings | Should -BeNullOrEmpty
+    }
+
+    It 'does not query table behavior for non-table Active dependencies' {
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                requiredcomponentobjectid = 'active-component'
+                requiredcomponenttype = 2
+                requiredcomponentparentid = $null
+                requiredcomponentbasesolutionid = '00000000-0000-0000-0000-000000000003'
+                dependentcomponentobjectid = 'dependent-attribute'
+                dependentcomponenttype = 2
+            }
+        } -ParameterFilter { $Sql -match 'FROM dependency dep' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                SolutionName = 'Active'
+                SolutionId = '00000000-0000-0000-0000-000000000003'
+                Managed = $false
+            }
+        } -ParameterFilter { $Sql -match 'WHERE s.solutionid = @requiredBaseSolutionId' }
+        Mock Invoke-DataverseSQL { } -ParameterFilter { $Sql -match 's.solutionid <> @solutionId' }
+
+        $findings = @(& "$PSScriptRoot/../../validationrules/DependencyOnSolutionNotAllowed.ps1" $ruleContext)
+
+        $findings | Should -BeNullOrEmpty
+        Should -Invoke Invoke-DataverseSQL -Exactly -Times 0 -ParameterFilter { $Sql -match 'SELECT TOP 1 sc.rootcomponentbehavior AS RootComponentBehavior' }
+    }
+
+    It 'resolves Active-based attribute dependencies to the solution containing the attribute' {
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                requiredcomponentobjectid = 'shared-name-attribute'
+                requiredcomponenttype = 2
+                requiredcomponentparentid = 'shared-table'
+                requiredcomponentbasesolutionid = '00000000-0000-0000-0000-000000000003'
+                dependentcomponentobjectid = 'shared-relationship'
+                dependentcomponenttype = 10
+            }
+        } -ParameterFilter { $Sql -match 'FROM dependency dep' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                SolutionName = 'Active'
+                SolutionId = '00000000-0000-0000-0000-000000000003'
+                Managed = $false
+            }
+        } -ParameterFilter { $Sql -match 'WHERE s.solutionid = @requiredBaseSolutionId' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                SolutionName = 'DependencySolution'
+                SolutionId = '00000000-0000-0000-0000-000000000004'
+                Managed = $false
+                ComponentId = 'shared-name-attribute'
+                ComponentType = 2
+                Behaviour = 'IncludeSubcomponents'
+            }
+        } -ParameterFilter { $Sql -match 's.solutionid <> @solutionId' }
+
+        $findings = @(& "$PSScriptRoot/../../validationrules/DependencyOnSolutionNotAllowed.ps1" $ruleContext)
+
+        $findings.Count | Should -Be 1
+        $findings[0].Message | Should -Match 'depends on solution DependencySolution'
+        $findings[0].Message | Should -Not -Match 'solution Active'
+        $findings[0].Message | Should -Not -Match 'configured after'
+        $ruleContext.laterSolutionNames = @('DependencySolution')
+        $findings = @(& "$PSScriptRoot/../../validationrules/DependencyOnSolutionNotAllowed.ps1" $ruleContext)
+        $findings[0].Message | Should -Match "DependencySolution.*configured later in the solution order"
+        $findings[0].Message | Should -Match 'cannot depend on components in a solution that appears later in the order'
+        $findings[0].Message | Should -Not -Match 'Move it before'
+    }
+
+    It 'does not report Active-based components in an allowed dependency solution' {
+        $ruleContext.validdependencysolutionnames = @('DependencySolution')
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                requiredcomponentobjectid = 'shared-name-attribute'
+                requiredcomponenttype = 2
+                requiredcomponentparentid = 'shared-table'
+                requiredcomponentbasesolutionid = '00000000-0000-0000-0000-000000000003'
+                dependentcomponentobjectid = 'shared-relationship'
+                dependentcomponenttype = 10
+            }
+        } -ParameterFilter { $Sql -match 'FROM dependency dep' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                SolutionName = 'Active'
+                SolutionId = '00000000-0000-0000-0000-000000000003'
+                Managed = $false
+            }
+        } -ParameterFilter { $Sql -match 'WHERE s.solutionid = @requiredBaseSolutionId' }
+        Mock Invoke-DataverseSQL {
+            [pscustomobject]@{
+                SolutionName = 'DependencySolution'
+                SolutionId = '00000000-0000-0000-0000-000000000004'
+                Managed = $false
+                ComponentId = 'shared-name-attribute'
+                ComponentType = 2
+                Behaviour = 'IncludeSubcomponents'
+            }
+        } -ParameterFilter { $Sql -match 's.solutionid <> @solutionId' }
+
+        $findings = @(& "$PSScriptRoot/../../validationrules/DependencyOnSolutionNotAllowed.ps1" $ruleContext)
+
+        $findings | Should -BeNullOrEmpty
     }
 }

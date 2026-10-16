@@ -90,37 +90,120 @@ WHERE s.solutionid = @requiredBaseSolutionId
             $baseSolutionName = $baseSolutionRows[0].SolutionName
             $baseSolutionId = $baseSolutionRows[0].SolutionId.ToString()
 
-            $isSystemOrDefault = $baseSolutionName -in @('Default', 'Common Data Services Default Solution', 'Active', 'Basic', 'System') -or $baseSolutionId -eq '00000001-0000-0000-0001-00000000009b'
-
-            $isIgnoredSolution = $false
-            if ($context.ignoresolutionnames -and $context.ignoresolutionnames.Length -gt 0) {
-                foreach ($pattern in $context.ignoresolutionnames) {
-                    if ($baseSolutionName -like $pattern) {
-                        $isIgnoredSolution = $true
-                        break
-                    }
+            if ($baseSolutionName -eq 'Active') {
+                $componentBehaviorFilter = if ($requiredComponentType -eq 1) {
+                    'AND (sc.rootcomponentbehavior = 0 OR sc.rootcomponentbehavior IS NULL)'
+                } else {
+                    'AND (sc.rootcomponentbehavior <> 2 OR sc.rootcomponentbehavior IS NULL)'
                 }
-            }
-
-            $isValidDependencySolution = $false
-            if ($context.validdependencysolutionnames -and $context.validdependencysolutionnames.Length -gt 0) {
-                foreach ($validPattern in $context.validdependencysolutionnames) {
-                    if ($baseSolutionName -like $validPattern) {
-                        $isValidDependencySolution = $true
-                        break
-                    }
-                }
-            }
-
-            if (-not $isSystemOrDefault -and $baseSolutionName -ne $context.solutionname -and -not $isIgnoredSolution -and -not $isValidDependencySolution) {
-                $requiredsolutioncomponents = @([PSCustomObject]@{
-                    SolutionName = $baseSolutionName
-                    SolutionId = $baseSolutionRows[0].SolutionId
-                    Managed = $baseSolutionRows[0].Managed
-                    ComponentId = $requiredComponentId
-                    ComponentType = $requiredComponentType
-                    Behaviour = "BaseLayer"
+                $activeMembershipSql = @"
+SELECT DISTINCT
+    s.uniquename AS SolutionName,
+    s.solutionid AS SolutionId,
+    s.ismanaged AS Managed,
+    sc.objectid AS ComponentId,
+    sc.componenttype AS ComponentType,
+    CASE sc.rootcomponentbehavior
+        WHEN 0 THEN 'IncludeSubcomponents'
+        WHEN 1 THEN 'ShellAndMetadata'
+        WHEN 2 THEN 'ShellOnly'
+        ELSE 'IncludeSubcomponents'
+    END AS Behaviour
+FROM solutioncomponent sc
+INNER JOIN solution s ON sc.solutionid = s.solutionid
+WHERE sc.objectid = @requiredComponentId
+    AND sc.componenttype = @requiredComponentType
+    AND s.solutionid <> @solutionId
+    AND s.uniquename NOT IN ('Default', 'Common Data Services Default Solution', 'Active', 'Basic', 'System')
+    AND s.solutionid <> '00000001-0000-0000-0001-00000000009b'
+    $componentBehaviorFilter
+ORDER BY s.installedon ASC, s.createdon ASC
+"@
+                $activeMemberships = @(Invoke-CachedValidationQuery -Cache $lookupCache -Key "activecomponent/$requiredComponentType/$requiredComponentId" -Sql $activeMembershipSql -Parameters @{
+                    solutionId = $solutionId
+                    requiredComponentId = $requiredComponentId
+                    requiredComponentType = $requiredComponentType
                 })
+
+                foreach ($membership in $activeMemberships) {
+                    $isIgnoredSolution = $false
+                    foreach ($pattern in $context.ignoresolutionnames) {
+                        if ($membership.SolutionName -like $pattern) {
+                            $isIgnoredSolution = $true
+                            break
+                        }
+                    }
+
+                    $isValidDependencySolution = $false
+                    foreach ($validPattern in $context.validdependencysolutionnames) {
+                        if ($membership.SolutionName -like $validPattern) {
+                            $isValidDependencySolution = $true
+                            break
+                        }
+                    }
+
+                    if (-not $isIgnoredSolution -and -not $isValidDependencySolution) {
+                        $requiredsolutioncomponents += $membership
+                    }
+                }
+
+                if ($activeMemberships.Length -eq 0 -and $requiredComponentType -eq 1) {
+                    $componentBehaviorSql = @"
+SELECT TOP 1 sc.rootcomponentbehavior AS RootComponentBehavior
+FROM solutioncomponent sc
+WHERE sc.solutionid = @solutionId
+    AND sc.objectid = @requiredComponentId
+    AND sc.componenttype = @requiredComponentType
+"@
+                    $componentBehaviorRows = @(Invoke-CachedValidationQuery -Cache $lookupCache -Key "behavior/$solutionId/$requiredComponentType/$requiredComponentId" -Sql $componentBehaviorSql -Parameters @{
+                        solutionId = $solutionId
+                        requiredComponentId = $requiredComponentId
+                        requiredComponentType = $requiredComponentType
+                    })
+                    if ($componentBehaviorRows.Length -gt 0 -and $componentBehaviorRows[0].RootComponentBehavior -eq 1) {
+                        $requiredsolutioncomponents += [PSCustomObject]@{
+                            SolutionName = '<Not in any solution>'
+                            SolutionId = $baseSolutionRows[0].SolutionId
+                            Managed = $baseSolutionRows[0].Managed
+                            ComponentId = $requiredComponentId
+                            ComponentType = $requiredComponentType
+                            Behaviour = 'ShellAndMetadata'
+                        }
+                    }
+                }
+            } else {
+                $isSystemOrDefault = $baseSolutionName -in @('Default', 'Common Data Services Default Solution', 'Basic', 'System') -or $baseSolutionId -eq '00000001-0000-0000-0001-00000000009b'
+
+                $isIgnoredSolution = $false
+                if ($context.ignoresolutionnames -and $context.ignoresolutionnames.Length -gt 0) {
+                    foreach ($pattern in $context.ignoresolutionnames) {
+                        if ($baseSolutionName -like $pattern) {
+                            $isIgnoredSolution = $true
+                            break
+                        }
+                    }
+                }
+
+                $isValidDependencySolution = $false
+                if ($context.validdependencysolutionnames -and $context.validdependencysolutionnames.Length -gt 0) {
+                    foreach ($validPattern in $context.validdependencysolutionnames) {
+                        if ($baseSolutionName -like $validPattern) {
+                            $isValidDependencySolution = $true
+                            break
+                        }
+                    }
+                }
+
+                if (-not $isSystemOrDefault -and $baseSolutionName -ne $context.solutionname -and -not $isIgnoredSolution -and -not $isValidDependencySolution) {
+                    $requiredsolutioncomponents = @([PSCustomObject]@{
+                        SolutionName = $baseSolutionName
+                        SolutionId = $baseSolutionRows[0].SolutionId
+                        Managed = $baseSolutionRows[0].Managed
+                        ComponentId = $requiredComponentId
+                        ComponentType = $requiredComponentType
+                        Behaviour = 'BaseLayer'
+                    })
+                }
             }
         }
     }
@@ -293,9 +376,13 @@ $badDeps | Select-Object -Unique ComponentId, SolutionName | ForEach-Object {
     }
     
     $detailsText = $matchingDeps[0] | Format-List | Out-String
+    $dependencyOrderDetails = ''
+    if ($context.PSObject.Properties['laterSolutionNames'] -and $context.laterSolutionNames -contains $solutionName) {
+        $dependencyOrderDetails = "`r`nThe required component is in solution '$solutionName', which is configured later in the solution order. A solution cannot depend on components in a solution that appears later in the order."
+    }
     
     writeResult -type "DependencyOnSolutionNotAllowed" `
         -componentid $componentId `
-        -message "`r`nThe solution $($context.solutionname) depends on solution $solutionName for a component but this is not in the valid list of dependency solutions ($($context.validdependencysolutionnames))`r`n$detailsText" `
+        -message "`r`nThe solution $($context.solutionname) depends on solution $solutionName for a component but this is not in the valid list of dependency solutions ($($context.validdependencysolutionnames))`r`n$detailsText$dependencyOrderDetails" `
         -asWarning ($mode -eq 'warning')
 }

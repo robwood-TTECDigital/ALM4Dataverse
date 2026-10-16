@@ -1,4 +1,4 @@
-function Get-AlmValidationSettings {
+function Get-AlmValidationSetting {
     param([Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$Config)
 
     $settings = @{ parallel = $true; maxParallel = 4 }
@@ -20,6 +20,7 @@ function Get-AlmValidationSettings {
     }
     return $settings
 }
+Set-Alias -Name Get-AlmValidationSettings -Value Get-AlmValidationSetting -Force
 
 function Format-AlmLogLine {
     param(
@@ -89,6 +90,7 @@ function Invoke-AlmValidationRule {
 }
 
 function Invoke-AlmValidationRules {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Accepts and schedules multiple validation rules in a single invocation.')]
     param(
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Rules,
@@ -159,7 +161,10 @@ function Invoke-AlmValidationRules {
                             $requestCommand = Get-Command Invoke-DataverseRequest
                             function Invoke-DataverseSQL { param($Sql, $Parameters); & $sqlCommand -Connection $Client @PSBoundParameters }
                             function Get-DataverseRecord { param($TableName, $Id, $Columns, $Top); & $recordCommand -Connection $Client @PSBoundParameters }
-                            function Get-DataverseEntityMetadata { param($EntityName, [switch]$UseMetadataCache, [switch]$ExcludeAttributes, [switch]$ExcludeRelationships, [switch]$ExcludePrivileges); & $metadataCommand -Connection $Client @PSBoundParameters }
+                            Set-Item -Path Function:\Get-DataverseEntityMetadata -Value {
+                                param($EntityName, [switch]$UseMetadataCache, [switch]$ExcludeAttributes, [switch]$ExcludeRelationships, [switch]$ExcludePrivileges)
+                                & $metadataCommand -Connection $Client @PSBoundParameters
+                            }
                             function Invoke-DataverseRequest { param($Method, $Path); & $requestCommand -Connection $Client @PSBoundParameters }
                             function Get-DataverseConnection { param([switch]$GetDefault); $null = $GetDefault; return $Client }
                             . $ValidationPath
@@ -169,6 +174,7 @@ function Invoke-AlmValidationRules {
                                 ignoresolutionnames = @($SourceContext.ignoresolutionnames)
                                 solutionconfig = $SourceContext.solutionconfig
                                 validationMode = $SourceContext.validationMode
+                                laterSolutionNames = @($SourceContext.laterSolutionNames)
                                 ruleMode = $Rule.Mode
                                 ComponentDefinitionCache = @{}
                                 ComponentNameCache = @{}
@@ -223,7 +229,7 @@ function Invoke-AlmValidationRules {
     }
 }
 
-function Write-AlmWorkerEvents {
+function Write-AlmWorkerEvent {
     param([Parameter(Mandatory)]$Events)
 
     $entry = $null
@@ -231,3 +237,4 @@ function Write-AlmWorkerEvents {
         Format-AlmLogLine -SolutionName $entry.SolutionName -Phase $entry.Phase -Text $entry.Message | ForEach-Object { Write-Host $_ }
     }
 }
+Set-Alias -Name Write-AlmWorkerEvents -Value Write-AlmWorkerEvent -Force

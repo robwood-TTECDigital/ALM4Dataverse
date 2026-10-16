@@ -108,6 +108,15 @@ $validationSettings = Get-AlmValidationSettings -Config $config
 
 foreach ($solutionconfig in $config.solutions) {
 
+    $laterSolutionNames = @()
+    $foundCurrentSolution = $false
+    foreach ($configuredSolution in $config.solutions) {
+        if ($foundCurrentSolution) {
+            $laterSolutionNames += $configuredSolution.name
+        } elseif ($configuredSolution.name -eq $solutionconfig.name) {
+            $foundCurrentSolution = $true
+        }
+    }
 
     Write-Host "[$($solutionconfig.name)][Validate] Reporting validation"
 
@@ -124,14 +133,21 @@ foreach ($solutionconfig in $config.solutions) {
     if ($context.ContainsKey('ArtifactStagingDirectory') -and $context['ArtifactStagingDirectory']) {
         $validationParameters.LogDirectory = Join-Path $context['ArtifactStagingDirectory'] "export-logs/$($solutionconfig.name)"
     }
-    if ($context.ContainsKey('ExportValidationResults') -and $context['ExportValidationResults'] -is [hashtable] -and $context['ExportValidationResults'].ContainsKey($solutionconfig.name) -and $null -ne $context['ExportValidationResults'][$solutionconfig.name]) {
-        $validationParameters.PrecomputedResults = @($context['ExportValidationResults'][$solutionconfig.name])
+    $precomputedResults = $null
+    if ($context.ContainsKey('SolutionHookResults') -and $context['SolutionHookResults'] -is [hashtable] -and $context['SolutionHookResults'].ContainsKey($solutionconfig.name) -and $null -ne $context['SolutionHookResults'][$solutionconfig.name]) {
+        $precomputedResults = $context['SolutionHookResults'][$solutionconfig.name]
+    } elseif ($context.ContainsKey('ExportValidationResults') -and $context['ExportValidationResults'] -is [hashtable] -and $context['ExportValidationResults'].ContainsKey($solutionconfig.name) -and $null -ne $context['ExportValidationResults'][$solutionconfig.name]) {
+        $precomputedResults = $context['ExportValidationResults'][$solutionconfig.name]
+    }
+    if ($null -ne $precomputedResults) {
+        $validationParameters.PrecomputedResults = @($precomputedResults)
     }
     validateSolution `
         -solutionname $solutionconfig.name `
         -validdependencysolutionnames $validdependencysolutionnames `
         -ignoresolutionnames $ignoresolutionnames `
-        -solutionconfig $solutionconfig @validationParameters
+        -solutionconfig $solutionconfig @validationParameters `
+        -LaterSolutionNames $laterSolutionNames
 
     $validdependencysolutionnames += $solutionconfig.name
 }

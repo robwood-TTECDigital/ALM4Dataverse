@@ -80,11 +80,14 @@ Set your valid dependencies in your ALM configuration:
         "msdyn_*"  # Wildcards supported
     )
     ignoresolutionnames = @(
-        "Default",
-        "Active"
+        "Default"
     )
 }
 ```
+
+An `Active` base solution is not a deployable dependency solution. For an `Active`-based dependency, the rule resolves the required component's membership in other solutions and applies the usual allowed-dependency checks to those solution names. This catches dependencies on components owned by a solution that has not yet been processed or is not allowed. If a required table is present only with `Include table metadata` (`rootcomponentbehavior = 1`) and no complete solution contains it, the finding reports `<Not in any solution>`; remove the table and add it again with `Include all objects`. `Active` can still be added to `ignoresolutionnames` to suppress this check intentionally.
+
+When the component-owning solution is present in the configured solution list but appears later than the solution being validated, the finding identifies that ordering as invalid: a solution cannot depend on components in a solution that appears later in the configured order.
 
 ## Resolution
 
