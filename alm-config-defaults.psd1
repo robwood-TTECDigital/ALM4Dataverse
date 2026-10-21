@@ -27,7 +27,7 @@
     }
 
     scriptDependencies = @{
-        "Rnwood.Dataverse.Data.PowerShell" = "3.2.0"
+        "Rnwood.Dataverse.Data.PowerShell" = "3.2.3"
     }
 
     # Power Apps CLI version used by pipeline scripts.
